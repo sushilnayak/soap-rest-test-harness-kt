@@ -1,0 +1,67 @@
+spring:
+  application:
+    name: kotlin-spring-webflux-app
+  profiles:
+    active: dev
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:postgres}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+  sql:
+    init:
+      mode: never
+
+app:
+  jwt:
+    secret: ${JWT_SECRET:local-dev-secret-key-that-is-at-least-256-bits-long}
+    expMinutes: 15
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    com.example.app: DEBUG
+    org.springframework.r2dbc: DEBUG
+    io.r2dbc.postgresql.QUERY: DEBUG
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+  r2dbc:
+    url: r2dbc:postgresql://localhost:5432/testdb
+    username: test
+    password: test
+
+app:
+  jwt:
+    secret: test-secret-key-that-is-at-least-256-bits-long
+    expMinutes: 5
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+
+app:
+  jwt:
+    secret: ${JWT_SECRET}
+    expMinutes: ${JWT_EXPIRE_MINUTES:15}
+
+logging:
+  level:
+    com.example.app: INFO
+    org.springframework.r2dbc: WARN
