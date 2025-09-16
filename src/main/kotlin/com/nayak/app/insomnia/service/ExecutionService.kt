@@ -8,8 +8,8 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.nayak.app.common.errors.DomainError
 import com.nayak.app.insomnia.api.AuthConfig
-import com.nayak.app.insomnia.api.InsomniaRequest
-import com.nayak.app.insomnia.api.InsomniaResponse
+import com.nayak.app.insomnia.api.ExecutionRequest
+import com.nayak.app.insomnia.api.ExecutionResponse
 import com.nayak.app.insomnia.api.RetryConfig
 import com.nayak.app.project.model.ProjectType
 import kotlinx.coroutines.delay
@@ -22,17 +22,18 @@ import org.springframework.web.reactive.function.client.awaitBody
 import org.springframework.web.reactive.function.client.awaitExchange
 
 @Service
-class InsomniaService(
+class ExecutionService(
     private val webClient: WebClient,
     private val objectMapper: ObjectMapper
 ) {
-    private val logger = LoggerFactory.getLogger(InsomniaService::class.java)
+    private val logger = LoggerFactory.getLogger(ExecutionService::class.java)
     private val xmlMapper = XmlMapper()
 
-    suspend fun executeRequest(request: InsomniaRequest): Either<DomainError, InsomniaResponse> {
+    suspend fun executeRequest(request: ExecutionRequest): Either<DomainError, ExecutionResponse> {
         return try {
             val startTime = System.currentTimeMillis()
 
+            // Get authentication token if required
             val authToken = if (request.authConfig?.required == true) {
                 getAuthToken(request.authConfig).fold(
                     ifLeft = { return it.left() },
@@ -40,52 +41,49 @@ class InsomniaService(
                 )
             } else null
 
+            // Prepare the actual request
             val preparedRequest = prepareRequest(request, authToken)
 
+            // Execute with retry logic
             val response = executeWithRetry(preparedRequest, request.retryConfig)
 
             val executionTime = System.currentTimeMillis() - startTime
 
-            InsomniaResponse(
+            ExecutionResponse(
                 success = response.statusCode in 200..299,
                 statusCode = response.statusCode,
                 headers = response.headers,
                 responseBody = response.body,
                 executionTimeMs = executionTime,
-                retryAttempts = response.retryAttempts,
+                retryAttempts = response.retryAttempts
             ).right()
 
         } catch (e: Exception) {
             logger.error("Request execution failed", e)
-            DomainError.External("Request failed with message : ${e.message}").left()
+            DomainError.External("Request execution failed: ${e.message}").left()
         }
     }
 
     suspend fun getAuthToken(authConfig: AuthConfig): Either<DomainError, String> {
         return try {
-//            val tokenRequest = buildMap {
-//                put("grant_type", authConfig.grantType)
-//                authConfig.clientId?.let { put("client_id", it) }
-//                authConfig.clientSecret?.let { put("client_secret", it) }
-//                authConfig.audience?.let { put("audience", it) }
-//                authConfig.scope?.let { put("scope", it) }
-//                putAll(authConfig.additionalParams)
-//            }
+            val tokenRequest = buildMap {
+                put("grant_type", authConfig.grantType)
+                authConfig.clientId?.let { put("client_id", it) }
+                authConfig.clientSecret?.let { put("client_secret", it) }
+                authConfig.audience?.let { put("audience", it) }
+                authConfig.scope?.let { put("scope", it) }
+                putAll(authConfig.additionalParams)
+            }
+
             val response = webClient.post()
                 .uri(authConfig.tokenUrl!!)
-                .contentType(MediaType.APPLICATION_JSON)
-//                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
-//                .bodyValue(tokenRequest.map { "${it.key}=${it.value}" }.joinToString("&"))
-                .bodyValue(
-                    """
-                    {}
-                """.trimIndent()
-                )
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .bodyValue(tokenRequest.map { "${it.key}=${it.value}" }.joinToString("&"))
                 .awaitExchange { clientResponse ->
                     if (clientResponse.statusCode().is2xxSuccessful) {
                         clientResponse.awaitBody<Map<String, Any>>()
                     } else {
-                        throw RuntimeException("Token request failed with response code ${clientResponse.statusCode()}")
+                        throw RuntimeException("Token request failed with status: ${clientResponse.statusCode()}")
                     }
                 }
 
@@ -93,18 +91,19 @@ class InsomniaService(
                 ?: return DomainError.Authentication("No access token in response").left()
 
             accessToken.right()
-
         } catch (e: Exception) {
             logger.error("Token acquisition failed", e)
             DomainError.Authentication("Token acquisition failed: ${e.message}").left()
         }
     }
 
-    suspend fun prepareRequest(request: InsomniaRequest, authToken: String?): PreparedRequest {
+    fun prepareRequest(request: ExecutionRequest, authToken: String?): PreparedRequest {
         val headers = request.headers.toMutableMap()
 
+        // Add authentication header if token is available
         authToken?.let { headers["Authorization"] = "Bearer $it" }
 
+        // Handle SOAP vs REST specific preparations
         val (finalMethod, finalBody, finalHeaders) = when (request.requestType) {
             ProjectType.SOAP -> {
                 headers["Content-Type"] = "text/xml; charset=utf-8"
@@ -128,23 +127,24 @@ class InsomniaService(
             queryParams = request.queryParams,
             timeoutSeconds = request.timeoutSeconds
         )
-
     }
 
-    private suspend fun executeWithRetry(
+    suspend fun executeWithRetry(
         request: PreparedRequest,
         retryConfig: RetryConfig?
     ): InternalResponse {
-        val maxAttempts = retryConfig?.maxRetries ?: 1
+        val maxAttempts = retryConfig?.maxAttempts ?: 1
         var lastException: Exception? = null
 
         repeat(maxAttempts) { attempt ->
             try {
                 val response = executeHttpRequest(request)
 
+                // Check if we should retry based on status code
                 if (retryConfig != null &&
                     response.statusCode in retryConfig.retryOnStatusCodes &&
-                    attempt < maxAttempts - 1) {
+                    attempt < maxAttempts - 1
+                ) {
                     delay(retryConfig.backoffDelayMs * (attempt + 1))
                     return@repeat
                 }
@@ -162,8 +162,7 @@ class InsomniaService(
     }
 
     suspend fun executeHttpRequest(request: PreparedRequest): InternalResponse {
-        return webClient
-            .method(request.method)
+        return webClient.method(request.method)
             .uri(request.url) { uriBuilder ->
                 request.queryParams.forEach { (key, value) ->
                     uriBuilder.queryParam(key, value)
@@ -177,13 +176,16 @@ class InsomniaService(
             }
             .apply {
                 request.body?.let { body ->
-                    bodyValue(if (request.headers["Content-Type"]?.contains("xml") == true) {
-                        xmlMapper.writeValueAsString(body)
-                    } else {
-                        objectMapper.writeValueAsString(body)
-                    })
+                    bodyValue(
+                        if (request.headers["Content-Type"]?.contains("xml") == true) {
+                            xmlMapper.writeValueAsString(body)
+                        } else {
+                            objectMapper.writeValueAsString(body)
+                        }
+                    )
                 }
             }
+            //TODO: Fix this
 //            .timeout(Duration.ofSeconds(request.timeoutSeconds.toLong()))
             .awaitExchange { clientResponse ->
                 val responseBody = try {

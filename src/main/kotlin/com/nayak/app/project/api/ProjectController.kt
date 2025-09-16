@@ -1,6 +1,7 @@
 package com.nayak.app.project.api
 
 import com.fasterxml.jackson.databind.JsonNode
+import com.nayak.app.bulk.app.BulkExecutionService
 import com.nayak.app.common.errors.toHttpStatus
 import com.nayak.app.common.http.ApiResponse
 import com.nayak.app.project.app.ProjectService
@@ -17,24 +18,15 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.web.bind.annotation.*
 import java.util.*
 
+
 @RestController
 @RequestMapping("/api/projects")
-@Tag(name = "Projects", description = "Api Related to Projects")
+@Tag(name = "Projects", description = "Project management endpoints")
 @SecurityRequirement(name = "bearer-jwt")
-class ProjectController(private val projectService: ProjectService) {
-
-    @GetMapping
-    @Operation(summary = "Get all projects")
-    suspend fun projects(): ResponseEntity<Any> {
-        return projectService.findAll().fold(
-            ifLeft = { error ->
-                ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Any>(error.message))
-            },
-            ifRight = { projects ->
-                ResponseEntity.ok(ApiResponse.success(projects))
-            }
-        )
-    }
+class ProjectController(
+    private val projectService: ProjectService,
+    private val bulkExecutionService: BulkExecutionService
+) {
 
     @PostMapping
     @Operation(summary = "Create a new project")
@@ -61,14 +53,53 @@ class ProjectController(private val projectService: ProjectService) {
         )
     }
 
-    @Operation(summary = "Get project by ID")
     @GetMapping("/{id}")
-    suspend fun project(@PathVariable id: UUID): ResponseEntity<Any> {
-        return projectService.findByProjectId(id).fold(
+    @Operation(summary = "Get project by ID")
+    suspend fun getProject(
+        @PathVariable id: UUID,
+    ): ResponseEntity<ApiResponse<Any>> {
+        return projectService.findProjectById(id).fold(
             ifLeft = { error ->
-                ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Any>(error.message))
+                ResponseEntity.status(error.toHttpStatus())
+                    .body(ApiResponse.error<Any>(error.message))
             },
-            ifRight = { projects -> ResponseEntity.ok(ApiResponse.success(data = projects)) }
+            ifRight = { project ->
+                ResponseEntity.ok(ApiResponse.success(project))
+            }
+        )
+    }
+
+    @GetMapping
+    @Operation(summary = "Get all projects for authenticated user")
+    suspend fun getProjects(
+    ): ResponseEntity<ApiResponse<Any>> {
+        return projectService.findAll().fold(
+            ifLeft = { error ->
+                ResponseEntity.status(error.toHttpStatus())
+                    .body(ApiResponse.error<Any>(error.message))
+            },
+            ifRight = { projects ->
+                ResponseEntity.ok(ApiResponse.success(projects))
+            }
+        )
+    }
+
+    @GetMapping("/{id}/excel-template")
+    @Operation(summary = "Generate Excel template for bulk execution")
+    suspend fun generateExcelTemplate(
+        @PathVariable id: UUID,
+        @AuthenticationPrincipal userId: String
+    ): ResponseEntity<ByteArray> {
+        return bulkExecutionService.generateExcelTemplate(id, userId).fold(
+            ifLeft = { error ->
+                ResponseEntity.status(error.toHttpStatus()).build()
+            },
+            ifRight = { excelBytes ->
+                ResponseEntity.ok()
+                    .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    .header("Content-Disposition", "attachment; filename=template.xlsx")
+                    .body(excelBytes)
+            }
         )
     }
 }

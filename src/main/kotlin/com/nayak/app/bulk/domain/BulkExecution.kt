@@ -15,8 +15,8 @@ data class BulkExecution(
     @Column("project_id")
     val projectId: UUID,
 
-    @Column("executor_id")
-    val executorId: String,
+    @Column("owner_id")
+    val ownerId: String,
 
     val status: BulkExecutionStatus,
 
@@ -52,7 +52,10 @@ data class BulkExecutionRequest(
     val projectId: UUID,
     val executeImmediately: Boolean = true,
     val conversionMode: ConversionMode = ConversionMode.NONE,
-    val targetUrl: String? = null // Override project URL if needed
+    val targetUrl: String? = null, // Override project URL if needed
+    val cacheAuthToken: Boolean = true, // Cache token for entire bulk execution
+    val respectCellColors: Boolean = true, // Use cell colors to exclude values
+    val appendResults: Boolean = true // Append results to Excel with ACTUAL_ prefix
 )
 
 enum class ConversionMode {
@@ -60,6 +63,7 @@ enum class ConversionMode {
     SOAP_TO_REST,   // Convert SOAP project to REST calls
     REST_TO_SOAP    // Convert REST project to SOAP calls
 }
+
 data class BulkExecutionResult(
     val rowIndex: Int,
     val success: Boolean,

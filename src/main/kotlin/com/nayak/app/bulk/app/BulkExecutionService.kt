@@ -5,25 +5,25 @@ import arrow.core.left
 import arrow.core.right
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.nayak.app.bulk.domain.BulkExecution
-import com.nayak.app.bulk.domain.BulkExecutionRequest
-import com.nayak.app.bulk.domain.BulkExecutionResult
-import com.nayak.app.bulk.domain.BulkExecutionStatus
-import com.nayak.app.bulk.domain.ConversionMode
+import com.nayak.app.bulk.domain.*
 import com.nayak.app.bulk.repo.BulkExecutionRepository
 import com.nayak.app.common.errors.DomainError
-import com.nayak.app.insomnia.api.InsomniaRequest
-import com.nayak.app.insomnia.service.InsomniaService
+import com.nayak.app.insomnia.api.AuthConfig
+import com.nayak.app.insomnia.api.ExecutionRequest
+import com.nayak.app.insomnia.service.ExecutionService
 import com.nayak.app.project.app.ProjectService
 import com.nayak.app.project.model.Project
 import com.nayak.app.project.model.ProjectType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.apache.poi.ss.usermodel.Cell
 import org.apache.poi.ss.usermodel.WorkbookFactory
+import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpMethod
 import org.springframework.stereotype.Service
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.*
 
@@ -31,15 +31,18 @@ import java.util.*
 class BulkExecutionService(
     private val bulkExecutionRepository: BulkExecutionRepository,
     private val projectService: ProjectService,
-    private val executionService: InsomniaService,
+    private val executionService: ExecutionService,
     private val objectMapper: ObjectMapper
 ) {
     private val logger = LoggerFactory.getLogger(BulkExecutionService::class.java)
 
+    // Cache for authentication tokens during bulk execution
+    private val tokenCache = mutableMapOf<String, CachedToken>()
+
     suspend fun processBulkExecution(
         request: BulkExecutionRequest,
         excelFile: InputStream,
-        executorId: String
+        ownerId: String
     ): Either<DomainError, BulkExecution> = withContext(Dispatchers.IO) {
         try {
             // Get project details
@@ -49,7 +52,7 @@ class BulkExecutionService(
             )
 
             // Parse Excel file
-            val rowData = parseExcelFile(excelFile).fold(
+            val excelData = parseExcelFileWithColors(excelFile, request.respectCellColors).fold(
                 ifLeft = { return@withContext it.left() },
                 ifRight = { it }
             )
@@ -57,9 +60,9 @@ class BulkExecutionService(
             // Create bulk execution record
             val bulkExecution = BulkExecution(
                 projectId = request.projectId,
-                executorId = executorId,
+                ownerId = ownerId,
                 status = BulkExecutionStatus.PENDING,
-                totalRows = rowData.size
+                totalRows = excelData.validRows.size
             )
 
             val savedExecution = bulkExecutionRepository.save(bulkExecution)
@@ -67,7 +70,7 @@ class BulkExecutionService(
             if (request.executeImmediately) {
                 // Process asynchronously
                 launch {
-                    processRows(savedExecution, project, rowData, request)
+                    processRows(savedExecution, project, excelData, request)
                 }
             }
 
@@ -78,7 +81,10 @@ class BulkExecutionService(
         }
     }
 
-    private suspend fun parseExcelFile(inputStream: InputStream): Either<DomainError, List<Map<String, String>>> {
+    private suspend fun parseExcelFileWithColors(
+        inputStream: InputStream,
+        respectColors: Boolean
+    ): Either<DomainError, ExcelData> {
         return try {
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
@@ -93,115 +99,210 @@ class BulkExecutionService(
                 headerRow.getCell(it)?.stringCellValue ?: "Column$it"
             }
 
-            // Parse data rows
-            val data = mutableListOf<Map<String, String>>()
+            // Parse data rows with color information
+            val validRows = mutableListOf<ExcelRowData>()
+            val skippedRows = mutableListOf<Int>()
+
             for (rowIndex in 1 until sheet.physicalNumberOfRows) {
                 val row = sheet.getRow(rowIndex) ?: continue
-                val rowData = mutableMapOf<String, String>()
+
+                // Check if row should be skipped based on "Skip Case(Y/N)" column
+                val skipColumnIndex = headers.indexOfFirst { it.equals("Skip Case(Y/N)", ignoreCase = true) }
+                if (skipColumnIndex >= 0) {
+                    val skipCell = row.getCell(skipColumnIndex)
+                    val skipValue = skipCell?.stringCellValue?.trim()?.uppercase()
+                    if (skipValue == "Y" || skipValue == "YES") {
+                        skippedRows.add(rowIndex)
+                        continue
+                    }
+                }
+
+                val rowData = mutableMapOf<String, CellData>()
 
                 headers.forEachIndexed { colIndex, header ->
                     val cell = row.getCell(colIndex)
-                    rowData[header] = cell?.toString() ?: ""
+                    val cellValue = cell?.toString() ?: ""
+
+                    // Check cell color if respectColors is enabled
+                    val isExcluded = if (respectColors && cell != null) {
+                        isCellColoredForExclusion(cell)
+                    } else false
+
+                    rowData[header] = CellData(cellValue, isExcluded)
                 }
 
-                data.add(rowData)
+                validRows.add(ExcelRowData(rowIndex, rowData))
             }
 
             workbook.close()
-            data.right()
+            ExcelData(headers, validRows, skippedRows).right()
         } catch (e: Exception) {
             logger.error("Excel parsing failed", e)
             DomainError.Validation("Excel parsing failed: ${e.message}").left()
         }
     }
 
+    private fun isCellColoredForExclusion(cell: Cell): Boolean {
+        return try {
+            val cellStyle = cell.cellStyle
+            val fillForegroundColor = cellStyle.fillForegroundColor
+
+            // Consider cells with red background (index 10) or yellow background (index 13) as excluded
+            // You can customize this logic based on your color scheme
+            fillForegroundColor == 10.toShort() || fillForegroundColor == 13.toShort()
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private suspend fun processRows(
         execution: BulkExecution,
         project: Project,
-        rowData: List<Map<String, String>>,
+        excelData: ExcelData,
         request: BulkExecutionRequest
     ) {
         try {
             // Update status to processing
             bulkExecutionRepository.save(execution.copy(status = BulkExecutionStatus.PROCESSING))
 
+            // Get authentication token once if caching is enabled
+            var cachedAuthToken: String? = null
+            if (request.cacheAuthToken) {
+                cachedAuthToken = getCachedAuthToken(project, request)
+            }
+
             val results = mutableListOf<BulkExecutionResult>()
             var successCount = 0
             var failureCount = 0
 
             // Process each row
-            rowData.forEachIndexed { index, row ->
+            excelData.validRows.forEachIndexed { index, rowData ->
                 try {
-                    val executionRequest = buildExecutionRequest(project, row, request)
+                    val executionRequest = buildExecutionRequest(
+                        project,
+                        rowData.data,
+                        request,
+                        cachedAuthToken
+                    )
                     val startTime = System.currentTimeMillis()
 
                     executionService.executeRequest(executionRequest).fold(
                         ifLeft = { error ->
-                            results.add(BulkExecutionResult(
-                                rowIndex = index,
-                                success = false,
-                                error = error.message,
-                                executionTimeMs = System.currentTimeMillis() - startTime
-                            ))
+                            results.add(
+                                BulkExecutionResult(
+                                    rowIndex = rowData.originalRowIndex,
+                                    success = false,
+                                    error = error.message,
+                                    executionTimeMs = System.currentTimeMillis() - startTime
+                                )
+                            )
                             failureCount++
                         },
                         ifRight = { response ->
-                            results.add(BulkExecutionResult(
-                                rowIndex = index,
-                                success = response.success,
-                                statusCode = response.statusCode,
-                                responseBody = response.responseBody,
-                                error = if (!response.success) "HTTP ${response.statusCode}" else null,
-                                executionTimeMs = response.executionTimeMs
-                            ))
+                            results.add(
+                                BulkExecutionResult(
+                                    rowIndex = rowData.originalRowIndex,
+                                    success = response.success,
+                                    statusCode = response.statusCode,
+                                    responseBody = response.responseBody,
+                                    error = if (!response.success) "HTTP ${response.statusCode}" else null,
+                                    executionTimeMs = response.executionTimeMs
+                                )
+                            )
                             if (response.success) successCount++ else failureCount++
                         }
                     )
 
                     // Update progress periodically
                     if ((index + 1) % 10 == 0) {
-                        bulkExecutionRepository.save(execution.copy(
-                            processedRows = index + 1,
-                            successfulRows = successCount,
-                            failedRows = failureCount
-                        ))
+                        bulkExecutionRepository.save(
+                            execution.copy(
+                                processedRows = index + 1,
+                                successfulRows = successCount,
+                                failedRows = failureCount
+                            )
+                        )
                     }
                 } catch (e: Exception) {
                     logger.error("Row processing failed for index $index", e)
-                    results.add(BulkExecutionResult(
-                        rowIndex = index,
-                        success = false,
-                        error = "Processing error: ${e.message}"
-                    ))
+                    results.add(
+                        BulkExecutionResult(
+                            rowIndex = rowData.originalRowIndex,
+                            success = false,
+                            error = "Processing error: ${e.message}"
+                        )
+                    )
                     failureCount++
                 }
             }
 
             // Final update
-            bulkExecutionRepository.save(execution.copy(
-                status = BulkExecutionStatus.COMPLETED,
-                processedRows = rowData.size,
-                successfulRows = successCount,
-                failedRows = failureCount,
-                results = objectMapper.valueToTree(results)
-            ))
+            bulkExecutionRepository.save(
+                execution.copy(
+                    status = BulkExecutionStatus.COMPLETED,
+                    processedRows = excelData.validRows.size,
+                    successfulRows = successCount,
+                    failedRows = failureCount,
+                    results = objectMapper.valueToTree(results)
+                )
+            )
 
         } catch (e: Exception) {
             logger.error("Bulk execution processing failed", e)
-            bulkExecutionRepository.save(execution.copy(
-                status = BulkExecutionStatus.FAILED,
-                errorDetails = e.message
-            ))
+            bulkExecutionRepository.save(
+                execution.copy(
+                    status = BulkExecutionStatus.FAILED,
+                    errorDetails = e.message
+                )
+            )
+        }
+    }
+
+    private suspend fun getCachedAuthToken(
+        project: Project,
+        request: BulkExecutionRequest
+    ): String? {
+        return try {
+            // Extract auth config from project metadata
+            val authConfig = extractAuthConfigFromProject(project)
+            if (authConfig?.required == true) {
+                val cacheKey = "${authConfig.tokenUrl}-${authConfig.clientId}"
+
+                // Check if token is cached and not expired
+                val cached = tokenCache[cacheKey]
+                if (cached != null && !cached.isExpired()) {
+                    return cached.token
+                }
+
+                // Get new token and cache it
+                val newToken = executionService.getAuthToken(authConfig).fold(
+                    ifLeft = { null },
+                    ifRight = { it }
+                )
+
+                newToken?.let {
+                    tokenCache[cacheKey] = CachedToken(it, System.currentTimeMillis() + 3300000) // 55 minutes
+                }
+
+                newToken
+            } else null
+        } catch (e: Exception) {
+            logger.warn("Failed to get cached auth token", e)
+            null
         }
     }
 
     private fun buildExecutionRequest(
         project: Project,
-        rowData: Map<String, String>,
-        request: BulkExecutionRequest
-    ): InsomniaRequest {
-        // Replace placeholders in project metadata with row data
-        val processedMeta = replaceTemplateVariables(project.meta, rowData)
+        rowData: Map<String, CellData>,
+        request: BulkExecutionRequest,
+        cachedAuthToken: String? = null
+    ): ExecutionRequest {
+        // Filter out excluded cells and replace placeholders
+        val filteredRowData = rowData.filterNot { it.value.isExcluded }
+            .mapValues { it.value.value }
+
+        val processedMeta = replaceTemplateVariables(project.meta, filteredRowData)
 
         // Determine target URL
         val targetUrl = request.targetUrl ?: when (project.type) {
@@ -211,9 +312,20 @@ class BulkExecutionService(
 
         // Handle conversion modes
         return when (request.conversionMode) {
-            ConversionMode.SOAP_TO_REST -> buildRestFromSoap(targetUrl, processedMeta, rowData)
-            ConversionMode.REST_TO_SOAP -> buildSoapFromRest(targetUrl, processedMeta, rowData)
-            ConversionMode.NONE -> buildDirectRequest(project, targetUrl, processedMeta, rowData)
+            ConversionMode.SOAP_TO_REST -> buildRestFromSoap(targetUrl, processedMeta, filteredRowData, cachedAuthToken)
+            ConversionMode.REST_TO_SOAP -> buildSoapFromRest(targetUrl, processedMeta, filteredRowData, cachedAuthToken)
+            ConversionMode.NONE -> buildDirectRequest(
+                project,
+                targetUrl,
+                processedMeta,
+                filteredRowData,
+                cachedAuthToken
+            )
+        }.let { executionRequest ->
+            // Override auth config if we have a cached token
+            if (cachedAuthToken != null) {
+                executionRequest.copy(authConfig = null) // Don't fetch token again
+            } else executionRequest
         }
     }
 
@@ -232,28 +344,38 @@ class BulkExecutionService(
         project: Project,
         targetUrl: String,
         meta: JsonNode,
-        rowData: Map<String, String>
-    ): InsomniaRequest {
+        rowData: Map<String, String>,
+        cachedAuthToken: String? = null
+    ): ExecutionRequest {
+        val headers = extractHeaders(meta).toMutableMap()
+        cachedAuthToken?.let { headers["Authorization"] = "Bearer $it" }
+
         return when (project.type) {
-            ProjectType.REST -> InsomniaRequest(
+            ProjectType.REST -> ExecutionRequest(
                 targetUrl = targetUrl,
                 httpMethod = HttpMethod.valueOf(meta.get("method")?.asText() ?: "POST"),
                 requestType = ProjectType.REST,
-                headers = extractHeaders(meta),
+                headers = headers,
                 requestBody = meta.get("requestTemplate"),
                 queryParams = extractQueryParams(meta)
             )
-            ProjectType.SOAP -> InsomniaRequest(
+
+            ProjectType.SOAP -> ExecutionRequest(
                 targetUrl = targetUrl,
                 httpMethod = HttpMethod.POST,
                 requestType = ProjectType.SOAP,
-                headers = extractHeaders(meta),
+                headers = headers,
                 requestBody = meta.get("requestTemplate")
             )
         }
     }
 
-    private fun buildRestFromSoap(targetUrl: String, meta: JsonNode, rowData: Map<String, String>): InsomniaRequest {
+    private fun buildRestFromSoap(
+        targetUrl: String,
+        meta: JsonNode,
+        rowData: Map<String, String>,
+        cachedAuthToken: String? = null
+    ): ExecutionRequest {
         // Convert SOAP template to REST JSON
         val soapTemplate = meta.get("requestTemplate")
         val jsonBody = if (soapTemplate != null) {
@@ -263,16 +385,24 @@ class BulkExecutionService(
             )
         } else null
 
-        return InsomniaRequest(
+        val headers = mutableMapOf("Content-Type" to "application/json")
+        cachedAuthToken?.let { headers["Authorization"] = "Bearer $it" }
+
+        return ExecutionRequest(
             targetUrl = targetUrl,
             httpMethod = HttpMethod.POST,
             requestType = ProjectType.REST,
-            headers = mapOf("Content-Type" to "application/json"),
+            headers = headers,
             requestBody = jsonBody
         )
     }
 
-    private fun buildSoapFromRest(targetUrl: String, meta: JsonNode, rowData: Map<String, String>): InsomniaRequest {
+    private fun buildSoapFromRest(
+        targetUrl: String,
+        meta: JsonNode,
+        rowData: Map<String, String>,
+        cachedAuthToken: String? = null
+    ): ExecutionRequest {
         // Convert REST JSON template to SOAP XML
         val jsonTemplate = meta.get("requestTemplate")
         val xmlBody = if (jsonTemplate != null) {
@@ -282,11 +412,14 @@ class BulkExecutionService(
             )
         } else null
 
-        return InsomniaRequest(
+        val headers = mutableMapOf("Content-Type" to "text/xml; charset=utf-8")
+        cachedAuthToken?.let { headers["Authorization"] = "Bearer $it" }
+
+        return ExecutionRequest(
             targetUrl = targetUrl,
             httpMethod = HttpMethod.POST,
             requestType = ProjectType.SOAP,
-            headers = mapOf("Content-Type" to "text/xml; charset=utf-8"),
+            headers = headers,
             requestBody = xmlBody
         )
     }
@@ -307,6 +440,17 @@ class BulkExecutionService(
         return params
     }
 
+    private fun extractAuthConfigFromProject(project: Project): AuthConfig? {
+        return try {
+            val authMeta = project.meta.get("authConfig")
+            if (authMeta != null) {
+                objectMapper.treeToValue(authMeta, AuthConfig::class.java)
+            } else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     suspend fun getBulkExecutionStatus(id: UUID): Either<DomainError, BulkExecution> {
         return try {
             val execution = bulkExecutionRepository.findById(id)
@@ -317,4 +461,126 @@ class BulkExecutionService(
             DomainError.Database("Failed to get bulk execution status: ${e.message}").left()
         }
     }
+
+    suspend fun generateExcelTemplate(
+        projectId: UUID,
+        ownerId: String
+    ): Either<DomainError, ByteArray> {
+        return try {
+            val project = projectService.findProjectById(projectId).fold(
+                ifLeft = { return it.left() },
+                ifRight = { it }
+            )
+
+            val workbook = XSSFWorkbook()
+            val sheet = workbook.createSheet("Template")
+
+            // Generate headers
+            val headers = mutableListOf<String>()
+
+            // Add default columns
+            headers.addAll(listOf("Test Case ID", "Skip Case(Y/N)", "Description"))
+
+            // Add request template headers
+            project.requestTemplate?.let { template ->
+                val requestHeaders = generateHeadersFromJson(template, "")
+                headers.addAll(requestHeaders)
+            }
+
+            // Add response template headers with EXPECTED_ prefix
+            project.responseTemplate?.let { template ->
+                val responseHeaders = generateHeadersFromJson(template, "EXPECTED_")
+                headers.addAll(responseHeaders)
+            }
+
+            // Create header row
+            val headerRow = sheet.createRow(0)
+            headers.forEachIndexed { index, header ->
+                headerRow.createCell(index).setCellValue(header)
+            }
+
+            // Auto-size columns
+            headers.indices.forEach { sheet.autoSizeColumn(it) }
+
+            val outputStream = ByteArrayOutputStream()
+            workbook.write(outputStream)
+            workbook.close()
+
+            outputStream.toByteArray().right()
+        } catch (e: Exception) {
+            logger.error("Excel template generation failed", e)
+            DomainError.Database("Excel template generation failed: ${e.message}").left()
+        }
+    }
+
+    private fun generateHeadersFromJson(jsonNode: JsonNode, prefix: String): List<String> {
+        val headers = mutableListOf<String>()
+        val pathToHeader = mutableMapOf<String, String>()
+
+        fun traverse(node: JsonNode, path: String) {
+            when {
+                node.isObject -> {
+                    node.fields().forEach { (key, value) ->
+                        val newPath = if (path.isEmpty()) key else "$path.$key"
+                        traverse(value, newPath)
+                    }
+                }
+
+                node.isArray && node.size() > 0 -> {
+                    traverse(node[0], "$path[0]")
+                }
+
+                else -> {
+                    val headerName = generateHeaderName(path, pathToHeader)
+                    headers.add("$prefix$headerName")
+                    pathToHeader[path] = headerName
+                }
+            }
+        }
+
+        traverse(jsonNode, "")
+        return headers
+    }
+
+    private fun generateHeaderName(path: String, existingHeaders: Map<String, String>): String {
+        val parts = path.split(".")
+
+        // Start with the last part
+        var candidate = parts.last().replace("[0]", "")
+
+        // Check for collisions and build up the path if needed
+        var depth = 1
+        while (existingHeaders.values.contains(candidate) && depth <= parts.size) {
+            val startIndex = maxOf(0, parts.size - depth - 1)
+            candidate = parts.subList(startIndex, parts.size)
+                .joinToString("_") { it.replace("[0]", "") }
+            depth++
+        }
+
+        return candidate
+    }
+}
+
+// Data classes for enhanced Excel processing
+data class ExcelData(
+    val headers: List<String>,
+    val validRows: List<ExcelRowData>,
+    val skippedRows: List<Int>
+)
+
+data class ExcelRowData(
+    val originalRowIndex: Int,
+    val data: Map<String, CellData>
+)
+
+data class CellData(
+    val value: String,
+    val isExcluded: Boolean = false
+)
+
+data class CachedToken(
+    val token: String,
+    val expiresAt: Long
+) {
+    fun isExpired(): Boolean = System.currentTimeMillis() > expiresAt
 }
