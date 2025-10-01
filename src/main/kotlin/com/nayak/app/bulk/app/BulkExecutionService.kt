@@ -11,16 +11,18 @@ import com.nayak.app.common.errors.DomainError
 import com.nayak.app.insomnia.api.AuthConfig
 import com.nayak.app.insomnia.api.ExecutionRequest
 import com.nayak.app.insomnia.service.ExecutionService
+import com.nayak.app.jobs.app.JobExecutionService
+import com.nayak.app.jobs.domain.*
 import com.nayak.app.project.app.ProjectService
 import com.nayak.app.project.model.Project
 import com.nayak.app.project.model.ProjectType
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.apache.poi.ss.usermodel.Cell
 import org.apache.poi.ss.usermodel.WorkbookFactory
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import org.springframework.http.HttpMethod
 import org.springframework.stereotype.Service
 import java.io.ByteArrayOutputStream
@@ -30,6 +32,7 @@ import java.util.*
 @Service
 class BulkExecutionService(
     private val bulkExecutionRepository: BulkExecutionRepository,
+    private val jobExecutionService: JobExecutionService,
     private val projectService: ProjectService,
     private val executionService: ExecutionService,
     private val objectMapper: ObjectMapper
@@ -43,7 +46,7 @@ class BulkExecutionService(
         request: BulkExecutionRequest,
         excelFile: InputStream,
         ownerId: String
-    ): Either<DomainError, BulkExecution> = withContext(Dispatchers.IO) {
+    ): Either<DomainError, JobExecution> = withContext(Dispatchers.IO) {
         try {
             // Get project details
             val project = projectService.findProjectById(request.projectId).fold(
@@ -67,17 +70,91 @@ class BulkExecutionService(
 
             val savedExecution = bulkExecutionRepository.save(bulkExecution)
 
+            // Create persistent job for execution
+            val jobPayload = BulkExecutionJobPayload(
+                bulkExecutionId = savedExecution.id!!,
+                projectId = request.projectId,
+                request = request,
+                excelData = ExcelJobData(
+                    headers = excelData.headers,
+                    validRows = excelData.validRows.map { row ->
+                        ExcelRowJobData(
+                            originalRowIndex = row.originalRowIndex,
+                            data = row.data.mapValues { CellJobData(it.value.value, it.value.isExcluded) }
+                        )
+                    },
+                    skippedRows = excelData.skippedRows
+                )
+            )
+
+            val job = jobExecutionService.createJob(
+                jobType = JobType.BULK_EXECUTION,
+                ownerId = ownerId,
+                payload = jobPayload,
+                maxRetries = 2
+            ).fold(
+                ifLeft = { return@withContext it.left() },
+                ifRight = { it }
+            )
+
             if (request.executeImmediately) {
-                // Process asynchronously
-                launch {
-                    processRows(savedExecution, project, excelData, request)
+                // Execute job asynchronously with persistent tracking
+                jobExecutionService.executeJobAsync(job) { jobExecution ->
+                    executeBulkJob(jobExecution)
                 }
             }
 
-            savedExecution.right()
+            job.right()
         } catch (e: Exception) {
             logger.error("Bulk execution setup failed", e)
             DomainError.Database("Bulk execution setup failed: ${e.message}").left()
+        }
+    }
+
+    private suspend fun executeBulkJob(job: JobExecution) {
+        val executionId = job.executionId
+
+        try {
+            // Set up structured logging context
+            MDC.put("executionId", executionId)
+            MDC.put("jobType", job.jobType.name)
+            MDC.put("ownerId", job.ownerId)
+
+            // Parse job payload
+            val payload = objectMapper.treeToValue(job.jobPayload, BulkExecutionJobPayload::class.java)
+            val bulkExecution = bulkExecutionRepository.findById(payload.bulkExecutionId)
+                ?: throw RuntimeException("Bulk execution not found: ${payload.bulkExecutionId}")
+
+            val project = projectService.findProjectById(payload.projectId).fold(
+                ifLeft = { throw RuntimeException("Project not found: ${payload.projectId}") },
+                ifRight = { it }
+            )
+
+            // Convert job data back to processing format
+            val excelData = ExcelData(
+                headers = payload.excelData.headers,
+                validRows = payload.excelData.validRows.map { row ->
+                    ExcelRowData(
+                        originalRowIndex = row.originalRowIndex,
+                        data = row.data.mapValues { CellData(it.value.value, it.value.isExcluded) }
+                    )
+                },
+                skippedRows = payload.excelData.skippedRows
+            )
+
+            logger.info(
+                "Starting bulk execution job: executionId={}, totalRows={}",
+                executionId, excelData.validRows.size
+            )
+
+            // Process rows with enhanced logging and progress tracking
+            processRowsWithJobTracking(bulkExecution, project, excelData, payload.request, executionId)
+
+        } catch (e: Exception) {
+            logger.error("Bulk execution job failed: executionId={}", executionId, e)
+            throw e
+        } finally {
+            MDC.clear()
         }
     }
 
@@ -155,11 +232,12 @@ class BulkExecutionService(
         }
     }
 
-    private suspend fun processRows(
+    private suspend fun processRowsWithJobTracking(
         execution: BulkExecution,
         project: Project,
         excelData: ExcelData,
-        request: BulkExecutionRequest
+        request: BulkExecutionRequest,
+        executionId: String
     ) {
         try {
             // Update status to processing
@@ -175,9 +253,23 @@ class BulkExecutionService(
             var successCount = 0
             var failureCount = 0
 
+            // Initialize progress tracking
+            jobExecutionService.updateJobProgress(
+                executionId, JobProgressInfo(
+                    totalItems = excelData.validRows.size,
+                    processedItems = 0,
+                    successfulItems = 0,
+                    failedItems = 0
+                )
+            )
+
             // Process each row
             excelData.validRows.forEachIndexed { index, rowData ->
                 try {
+                    // Set row-specific MDC context
+                    MDC.put("rowIndex", rowData.originalRowIndex.toString())
+                    MDC.put("currentRow", "${index + 1}/${excelData.validRows.size}")
+
                     val executionRequest = buildExecutionRequest(
                         project,
                         rowData.data,
@@ -188,6 +280,14 @@ class BulkExecutionService(
 
                     executionService.executeRequest(executionRequest).fold(
                         ifLeft = { error ->
+                            logger.warn(
+                                "Row execution failed: rowIndex={}, error={}",
+                                rowData.originalRowIndex, error.message
+                            )
+
+                            // Log sanitized request for debugging
+                            logFailedRequest(executionRequest, error.message)
+
                             results.add(
                                 BulkExecutionResult(
                                     rowIndex = rowData.originalRowIndex,
@@ -199,6 +299,21 @@ class BulkExecutionService(
                             failureCount++
                         },
                         ifRight = { response ->
+                            if (response.success) {
+                                logger.debug(
+                                    "Row execution succeeded: rowIndex={}, statusCode={}, duration={}ms",
+                                    rowData.originalRowIndex, response.statusCode, response.executionTimeMs
+                                )
+                            } else {
+                                logger.warn(
+                                    "Row execution returned error: rowIndex={}, statusCode={}, duration={}ms",
+                                    rowData.originalRowIndex, response.statusCode, response.executionTimeMs
+                                )
+
+                                // Log sanitized request for debugging
+                                logFailedRequest(executionRequest, "HTTP ${response.statusCode}")
+                            }
+
                             results.add(
                                 BulkExecutionResult(
                                     rowIndex = rowData.originalRowIndex,
@@ -215,6 +330,16 @@ class BulkExecutionService(
 
                     // Update progress periodically
                     if ((index + 1) % 10 == 0) {
+                        jobExecutionService.updateJobProgress(
+                            executionId, JobProgressInfo(
+                                totalItems = excelData.validRows.size,
+                                processedItems = index + 1,
+                                successfulItems = successCount,
+                                failedItems = failureCount,
+                                currentItem = "Row ${rowData.originalRowIndex}"
+                            )
+                        )
+
                         bulkExecutionRepository.save(
                             execution.copy(
                                 processedRows = index + 1,
@@ -224,7 +349,10 @@ class BulkExecutionService(
                         )
                     }
                 } catch (e: Exception) {
-                    logger.error("Row processing failed for index $index", e)
+                    logger.error(
+                        "Row processing failed: rowIndex={}, index={}",
+                        rowData.originalRowIndex, index, e
+                    )
                     results.add(
                         BulkExecutionResult(
                             rowIndex = rowData.originalRowIndex,
@@ -233,8 +361,22 @@ class BulkExecutionService(
                         )
                     )
                     failureCount++
+                } finally {
+                    // Clear row-specific MDC
+                    MDC.remove("rowIndex")
+                    MDC.remove("currentRow")
                 }
             }
+
+            // Final progress update
+            jobExecutionService.updateJobProgress(
+                executionId, JobProgressInfo(
+                    totalItems = excelData.validRows.size,
+                    processedItems = excelData.validRows.size,
+                    successfulItems = successCount,
+                    failedItems = failureCount
+                )
+            )
 
             // Final update
             bulkExecutionRepository.save(
@@ -247,14 +389,150 @@ class BulkExecutionService(
                 )
             )
 
+            logger.info(
+                "Bulk execution completed: executionId={}, total={}, success={}, failed={}",
+                executionId, excelData.validRows.size, successCount, failureCount
+            )
+
         } catch (e: Exception) {
-            logger.error("Bulk execution processing failed", e)
+            logger.error("Bulk execution processing failed: executionId={}", executionId, e)
             bulkExecutionRepository.save(
                 execution.copy(
                     status = BulkExecutionStatus.FAILED,
                     errorDetails = e.message
                 )
             )
+        }
+    }
+
+
+//    private suspend fun processRows(
+//        execution: BulkExecution,
+//        project: Project,
+//        excelData: ExcelData,
+//        request: BulkExecutionRequest
+//    ) {
+//        try {
+//            // Update status to processing
+//            bulkExecutionRepository.save(execution.copy(status = BulkExecutionStatus.PROCESSING))
+//
+//            // Get authentication token once if caching is enabled
+//            var cachedAuthToken: String? = null
+//            if (request.cacheAuthToken) {
+//                cachedAuthToken = getCachedAuthToken(project, request)
+//            }
+//
+//            val results = mutableListOf<BulkExecutionResult>()
+//            var successCount = 0
+//            var failureCount = 0
+//
+//            // Process each row
+//            excelData.validRows.forEachIndexed { index, rowData ->
+//                try {
+//                    val executionRequest = buildExecutionRequest(
+//                        project,
+//                        rowData.data,
+//                        request,
+//                        cachedAuthToken
+//                    )
+//                    val startTime = System.currentTimeMillis()
+//
+//                    executionService.executeRequest(executionRequest).fold(
+//                        ifLeft = { error ->
+//                            results.add(
+//                                BulkExecutionResult(
+//                                    rowIndex = rowData.originalRowIndex,
+//                                    success = false,
+//                                    error = error.message,
+//                                    executionTimeMs = System.currentTimeMillis() - startTime
+//                                )
+//                            )
+//                            failureCount++
+//                        },
+//                        ifRight = { response ->
+//                            results.add(
+//                                BulkExecutionResult(
+//                                    rowIndex = rowData.originalRowIndex,
+//                                    success = response.success,
+//                                    statusCode = response.statusCode,
+//                                    responseBody = response.responseBody,
+//                                    error = if (!response.success) "HTTP ${response.statusCode}" else null,
+//                                    executionTimeMs = response.executionTimeMs
+//                                )
+//                            )
+//                            if (response.success) successCount++ else failureCount++
+//                        }
+//                    )
+//
+//                    // Update progress periodically
+//                    if ((index + 1) % 10 == 0) {
+//                        bulkExecutionRepository.save(
+//                            execution.copy(
+//                                processedRows = index + 1,
+//                                successfulRows = successCount,
+//                                failedRows = failureCount
+//                            )
+//                        )
+//                    }
+//                } catch (e: Exception) {
+//                    logger.error("Row processing failed for index $index", e)
+//                    results.add(
+//                        BulkExecutionResult(
+//                            rowIndex = rowData.originalRowIndex,
+//                            success = false,
+//                            error = "Processing error: ${e.message}"
+//                        )
+//                    )
+//                    failureCount++
+//                }
+//            }
+//
+//            // Final update
+//            bulkExecutionRepository.save(
+//                execution.copy(
+//                    status = BulkExecutionStatus.COMPLETED,
+//                    processedRows = excelData.validRows.size,
+//                    successfulRows = successCount,
+//                    failedRows = failureCount,
+//                    results = objectMapper.valueToTree(results)
+//                )
+//            )
+//
+//        } catch (e: Exception) {
+//            logger.error("Bulk execution processing failed", e)
+//            bulkExecutionRepository.save(
+//                execution.copy(
+//                    status = BulkExecutionStatus.FAILED,
+//                    errorDetails = e.message
+//                )
+//            )
+//        }
+//    }
+
+    private fun logFailedRequest(request: ExecutionRequest, error: String) {
+        try {
+            // Create sanitized request for logging (remove sensitive data)
+            val sanitizedHeaders = request.headers.mapValues { (key, value) ->
+                if (key.lowercase().contains("authorization") ||
+                    key.lowercase().contains("token") ||
+                    key.lowercase().contains("secret")
+                ) {
+                    "***REDACTED***"
+                } else value
+            }
+
+            val sanitizedRequest = mapOf(
+                "url" to request.targetUrl,
+                "method" to request.httpMethod.name(),
+                "headers" to sanitizedHeaders,
+                "hasBody" to (request.requestBody != null),
+                "bodySize" to (request.requestBody?.toString()?.length ?: 0),
+                "error" to error
+            )
+
+            logger.error("Failed request details: {}", objectMapper.writeValueAsString(sanitizedRequest))
+        } catch (e: Exception) {
+            logger.warn("Failed to log request details", e)
         }
     }
 

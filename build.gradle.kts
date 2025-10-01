@@ -48,7 +48,8 @@ dependencies {
 
     implementation("io.arrow-kt:arrow-core:2.1.2")
     implementation("io.arrow-kt:arrow-fx-coroutines:2.1.2")
-
+    // Scheduling support
+    implementation("org.springframework:spring-context-support")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("io.projectreactor:reactor-test")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")

@@ -27,9 +27,13 @@ management:
 
 logging:
   level:
-    com.example.app: DEBUG
+    com.nayak.app: DEBUG
+    com.nayak.app.jobs: INFO
+    com.nayak.app.bulk: INFO
     org.springframework.r2dbc: DEBUG
     io.r2dbc.postgresql.QUERY: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level [%X{executionId:-}] [%X{jobType:-}] %logger{36} - %msg%n"
 
 ---
 spring:
