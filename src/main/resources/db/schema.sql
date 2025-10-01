@@ -95,3 +95,46 @@ CREATE TRIGGER update_bulk_executions_updated_at
     BEFORE UPDATE
     ON bulk_executions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+
+-- ##############
+
+ DROP TRIGGER IF EXISTS update_projects_updated_at ON projects;
+CREATE TRIGGER update_projects_updated_at
+    BEFORE UPDATE ON projects
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+ -- Create job_executions table for persistent job queue
+ CREATE TABLE IF NOT EXISTS job_executions (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        job_type VARCHAR(50) NOT NULL CHECK (job_type IN ('BULK_EXECUTION', 'TEST_GENERATION', 'TEMPLATE_PROCESSING')),
+        execution_id VARCHAR(50) UNIQUE NOT NULL,
+        status VARCHAR(20) NOT NULL CHECK (status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'RETRY_SCHEDULED')),
+        owner_id VARCHAR(50) NOT NULL,
+        job_payload JSONB NOT NULL,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        max_retries INTEGER NOT NULL DEFAULT 3,
+        next_retry_at TIMESTAMP WITH TIME ZONE,
+        started_at TIMESTAMP WITH TIME ZONE,
+        completed_at TIMESTAMP WITH TIME ZONE,
+        error_message TEXT,
+        error_details JSONB,
+        progress_info JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (owner_id) REFERENCES users(user_id) ON DELETE CASCADE
+    );
+
+-- Create indexes for job_executions
+CREATE INDEX IF NOT EXISTS idx_job_executions_execution_id ON job_executions(execution_id);
+CREATE INDEX IF NOT EXISTS idx_job_executions_owner_id ON job_executions(owner_id);
+CREATE INDEX IF NOT EXISTS idx_job_executions_status ON job_executions(status);
+CREATE INDEX IF NOT EXISTS idx_job_executions_job_type ON job_executions(job_type);
+CREATE INDEX IF NOT EXISTS idx_job_executions_retry_schedule ON job_executions(status, next_retry_at) WHERE status = 'RETRY_SCHEDULED';
+CREATE INDEX IF NOT EXISTS idx_job_executions_created_at ON job_executions(created_at);
+
+-- Create trigger for job_executions updated_at
+DROP TRIGGER IF EXISTS update_job_executions_updated_at ON job_executions;
+CREATE TRIGGER update_job_executions_updated_at
+        BEFORE UPDATE ON job_executions
+                     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
