@@ -50,11 +50,11 @@ class SecurityConfig(
 
     @Bean
     fun reactiveUserDetailsService(): ReactiveUserDetailsService {
-        return ReactiveUserDetailsService { email ->
+        return ReactiveUserDetailsService { racfId ->
             mono {
-                userRepository.findByEmail(email)?.let { user ->
+                userRepository.findByRacfId(racfId)?.let { user ->
                     User.builder()
-                        .username(email)
+                        .username(racfId)
                         .password(user.passwordHash)
                         .roles(*user.roles.toTypedArray())
                         .build()

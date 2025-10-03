@@ -17,14 +17,14 @@ class UserService(
     private val jwtService: JwtService
 ) {
 
-    suspend fun signup(email: String, password: String): Either<DomainError, User> =
+    suspend fun signup(racfId: String, password: String): Either<DomainError, User> =
         try {
-            if (userRepository.existsByEmail(email)) {
-                DomainError.Conflict("User with email '$email' already exists").left()
+            if (userRepository.existsByRacfId(racfId)) {
+                DomainError.Conflict("User with racfId '$racfId' already exists").left()
             } else {
                 val passwordHash = passwordEncoder.encode(password)
                 val user = User(
-                    email = email,
+                    racfId = racfId,
                     passwordHash = passwordHash,
                     roles = setOf("USER")
                 )
@@ -35,13 +35,13 @@ class UserService(
             DomainError.Database("Failed to create user: ${e.message}").left()
         }
 
-    suspend fun login(email: String, password: String): Either<DomainError, TokenResponse> {
+    suspend fun login(racfId: String, password: String): Either<DomainError, TokenResponse> {
         return try {
             val user =
-                userRepository.findByEmail(email) ?: return DomainError.NotFound("User not found with $email").left()
+                userRepository.findByRacfId(racfId) ?: return DomainError.NotFound("User not found with $racfId").left()
 
             if (passwordEncoder.matches(password, user.passwordHash)) {
-                val token = jwtService.generateToken(user.email, user.roles)
+                val token = jwtService.generateToken(user.racfId, user.roles)
                 val expiresIn = jwtService.getExpirationInMinutes() * 60 // in seconds
 
                 TokenResponse(

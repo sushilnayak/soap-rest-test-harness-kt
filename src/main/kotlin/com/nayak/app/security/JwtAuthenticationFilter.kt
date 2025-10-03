@@ -19,7 +19,7 @@ class JwtAuthenticationFilter(private val jwtService: JwtService) : WebFilter {
             if (!jwtService.validateToken(token)) {
                 chain.filter(exchange)
             } else {
-                val principal = jwtService.extractEmailFromToken(token)
+                val principal = jwtService.extractRacfIdFromToken(token)
                 val authorities = jwtService.extractRolesFromToken(token)
                     .map { SimpleGrantedAuthority("ROLE_$it") }
 

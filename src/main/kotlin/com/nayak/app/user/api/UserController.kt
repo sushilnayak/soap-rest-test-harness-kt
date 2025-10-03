@@ -20,7 +20,7 @@ class UserController(private val userService: UserService) {
 
     @PostMapping("/signup")
     suspend fun signup(@Valid @RequestBody request: SignupRequest): ResponseEntity<ApiResponse<Unit>> {
-        return userService.signup(request.email, request.password).fold(
+        return userService.signup(request.racfId, request.password).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Unit>(error.message))
             },
@@ -33,7 +33,7 @@ class UserController(private val userService: UserService) {
     @PostMapping("/login")
     @Operation(summary = "Log in", description = "Authenticate user and get JWT Token", tags = ["Authentication"])
     suspend fun login(@Valid @RequestBody request: LoginRequest): ResponseEntity<ApiResponse<Any>> {
-        return userService.login(request.email, request.password).fold(
+        return userService.login(request.racfId, request.password).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Any>(error.message))
             },
@@ -43,8 +43,8 @@ class UserController(private val userService: UserService) {
 }
 
 data class SignupRequest(
-    @field:NotBlank(message = "Email cannot be blank")
-    val email: String,
+    @field:NotBlank(message = "Racf ID cannot be blank")
+    val racfId: String,
     @field:NotBlank
 
     @field:NotBlank(message = "Password cannot be blank")
@@ -52,8 +52,8 @@ data class SignupRequest(
 )
 
 data class LoginRequest(
-    @field:NotBlank(message = "Email cannot be blank")
-    val email: String,
+    @field:NotBlank(message = "Racf ID cannot be blank")
+    val racfId: String,
 
     @field:NotBlank(message = "Password cannot be blank")
     val password: String

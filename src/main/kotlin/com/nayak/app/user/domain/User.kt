@@ -4,14 +4,14 @@ import org.springframework.data.annotation.Id
 import org.springframework.data.relational.core.mapping.Column
 import org.springframework.data.relational.core.mapping.Table
 import java.time.LocalDateTime
-import java.util.UUID
+import java.util.*
 
 @Table("users")
 data class User(
     @Id
     val id: UUID? = null,
-    @Column("email")
-    val email: String,
+    @Column("racf_id")
+    val racfId: String,
     @Column("password_hash")
     val passwordHash: String,
 
