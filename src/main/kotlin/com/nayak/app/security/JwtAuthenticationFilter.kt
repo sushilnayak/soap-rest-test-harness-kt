@@ -33,12 +33,11 @@ class JwtAuthenticationFilter(private val jwtService: JwtService) : WebFilter {
         }
     }
 
-    private fun extractJwtFromRequest(httpRequest: ServerHttpRequest): String? {
+    fun extractJwtFromRequest(httpRequest: ServerHttpRequest): String? {
         val bearerToken = httpRequest.headers.getFirst(HttpHeaders.AUTHORIZATION)
 
         return if (bearerToken != null && bearerToken.startsWith("Bearer ")) {
             return bearerToken.removePrefix("Bearer ")
         } else null
     }
-
 }
