@@ -3,12 +3,18 @@ package com.nayak.app.user.app
 import arrow.core.Either
 import arrow.core.raise.either
 import arrow.core.raise.ensure
+import com.fasterxml.jackson.databind.JsonNode
 import com.nayak.app.common.errors.DomainError
+import com.nayak.app.project.app.ProjectDto
+import com.nayak.app.project.model.Project
+import com.nayak.app.project.model.ProjectType
 import com.nayak.app.security.JwtService
 import com.nayak.app.user.domain.User
 import com.nayak.app.user.repo.UserRepository
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
+import java.time.LocalDateTime
+import java.util.UUID
 
 @Service
 class AuthService(
@@ -17,7 +23,7 @@ class AuthService(
     private val jwtService: JwtService
 ) {
 
-    suspend fun signup(racfId: String, password: String): Either<DomainError, User> = either {
+    suspend fun signup(racfId: String, password: String): Either<DomainError, TokenResponse> = either {
 
         ensure(!userRepository.existsByRacfId(racfId)) {
             DomainError.Conflict("User with racfId '$racfId' already exists")
@@ -27,11 +33,26 @@ class AuthService(
             .mapLeft { e -> DomainError.Authentication("Failed to encode password: ${e.message}") }
             .bind()
 
-        val user = User(racfId = racfId, passwordHash = hash, roles = setOf("ROLE"))
+        val user = User( racfId = racfId, passwordHash = hash, roles = setOf("USER"))
 
-        Either.catch { userRepository.save(user) }
-            .mapLeft { e -> DomainError.Database("Failed to create user: ${e.message}") }
+        val updatedUser = Either.catch { userRepository.save(user) }
+            .mapLeft { e ->
+                DomainError.Database("Failed to create user: ${e.message}")
+            }
             .bind()
+
+        Either.catch {
+            val token = jwtService.generateToken(updatedUser.racfId, updatedUser.roles)
+            val expiresIn = jwtService.getExpirationInMinutes() * 60
+
+            TokenResponse(
+                accessToken = token,
+                expiresIn = expiresIn,
+                tokenType = "Bearer",
+                user = updatedUser.toDto()
+            )
+        }.mapLeft { e -> DomainError.Authentication("Token generation failed : ${e.message}") }.bind()
+
     }
 //        try {
 //            if (userRepository.existsByRacfId(racfId)) {
@@ -68,7 +89,8 @@ class AuthService(
             TokenResponse(
                 accessToken = token,
                 expiresIn = expiresIn,
-                tokenType = "Bearer"
+                tokenType = "Bearer",
+                user = user.toDto()
             )
         }.mapLeft { e -> DomainError.Authentication("Authentication failed : ${e.message}") }.bind()
 
@@ -95,9 +117,16 @@ class AuthService(
 //        }
 }
 
-
 data class TokenResponse(
     val accessToken: String,
     val expiresIn: Long,
     val tokenType: String,
+    val user : UserDto
+)
+
+fun User.toDto() = UserDto(
+    id = id!!,
+    racfId = racfId,
+    roles = roles,
+    isEnabled = isEnabled
 )

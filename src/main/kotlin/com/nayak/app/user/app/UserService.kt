@@ -176,9 +176,7 @@ class UserService(
         id = id!!,
         racfId = racfId,
         roles = roles,
-        isEnabled = isEnabled,
-        createdAt = createdAt,
-        updatedAt = updatedAt
+        isEnabled = isEnabled
     )
 }
 
@@ -191,9 +189,7 @@ data class UserDto(
     val id: UUID,
     val racfId: String,
     val roles: Set<String>,
-    val isEnabled: Boolean,
-    val createdAt: java.time.LocalDateTime,
-    val updatedAt: java.time.LocalDateTime
+    val isEnabled: Boolean
 )
 
 data class PagedResult<T>(

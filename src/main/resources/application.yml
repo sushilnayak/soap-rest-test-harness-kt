@@ -14,7 +14,7 @@ spring:
 app:
   jwt:
     secret: ${JWT_SECRET:local-dev-secret-key-that-is-at-least-256-bits-long}
-    expMinutes: 15
+    expMinutes: 720
 
 management:
   endpoints:

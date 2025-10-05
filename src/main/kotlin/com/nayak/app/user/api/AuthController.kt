@@ -8,10 +8,12 @@ import io.swagger.v3.oas.annotations.tags.Tag
 import jakarta.validation.Valid
 import jakarta.validation.constraints.NotBlank
 import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.CrossOrigin
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
+
 
 @RestController
 @RequestMapping("/api/auth")
@@ -19,13 +21,13 @@ import org.springframework.web.bind.annotation.RestController
 class AuthController(private val authService: AuthService) {
 
     @PostMapping("/signup")
-    suspend fun signup(@Valid @RequestBody request: SignupRequest): ResponseEntity<ApiResponse<Unit>> {
+    suspend fun signup(@Valid @RequestBody request: SignupRequest): ResponseEntity<ApiResponse<Any>> {
         return authService.signup(request.racfId, request.password).fold(
             ifLeft = { error ->
-                ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Unit>(error.message))
+                ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Any>(error.message))
             },
-            ifRight = {
-                ResponseEntity.ok(ApiResponse.success(Unit, "User Registered Successfully"))
+            ifRight = { tokenResponse ->
+                ResponseEntity.ok(ApiResponse.success(tokenResponse, "User Registered Successfully"))
             }
         )
     }
@@ -45,7 +47,6 @@ class AuthController(private val authService: AuthService) {
 data class SignupRequest(
     @field:NotBlank(message = "Racf ID cannot be blank")
     val racfId: String,
-    @field:NotBlank
 
     @field:NotBlank(message = "Password cannot be blank")
     val password: String

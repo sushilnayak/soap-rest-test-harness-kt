@@ -1,5 +1,7 @@
 package com.nayak.app.config
 
+import com.nayak.app.common.security.CustomAccessDeniedHandler
+import com.nayak.app.common.security.CustomAuthenticationEntryPoint
 import com.nayak.app.security.JwtAuthenticationFilter
 import com.nayak.app.security.JwtService
 import com.nayak.app.user.repo.UserRepository
@@ -18,30 +20,50 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.security.web.server.SecurityWebFilterChain
 import org.springframework.security.web.server.context.NoOpServerSecurityContextRepository
+import org.springframework.web.cors.CorsConfiguration
 
 @Configuration
 @EnableWebFluxSecurity
 class SecurityConfig(
     private val jwtService: JwtService,
-    private val userRepository: UserRepository
+    private val userRepository: UserRepository,
+    private val authenticationEntryPoint: CustomAuthenticationEntryPoint,
+    private val accessDeniedHandler: CustomAccessDeniedHandler
 ) {
 
     @Bean
     fun securityWebFilterChain(http: ServerHttpSecurity): SecurityWebFilterChain {
         return http
             .csrf { it.disable() }
+            .cors { }
+            .cors { cors ->
+                cors.configurationSource {
+                    CorsConfiguration().apply {
+                        allowedOrigins = listOf("*")
+                        allowedMethods = listOf("*")
+                        allowedHeaders = listOf("*")
+                        exposedHeaders = listOf("*")
+                    }
+                }
+            }
             .httpBasic { it.disable() }
             .formLogin { it.disable() }
             .logout { it.disable() }
             .securityContextRepository(NoOpServerSecurityContextRepository.getInstance())
+            .exceptionHandling { exceptionHandling ->
+                exceptionHandling
+                    .authenticationEntryPoint(authenticationEntryPoint)
+                    .accessDeniedHandler(accessDeniedHandler)
+            }
             .authorizeExchange { exchanges ->
                 exchanges
+                    .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                     .pathMatchers("/actuator/health").permitAll()
                     .pathMatchers("/v3/api-docs/**", "/swagger-ui/**", "/webjars/**").permitAll()
                     .pathMatchers(HttpMethod.POST, "/api/auth/**").permitAll()
                     .anyExchange().authenticated()
             }
-            .addFilterAfter(JwtAuthenticationFilter(jwtService), SecurityWebFiltersOrder.AUTHORIZATION)
+            .addFilterAt(JwtAuthenticationFilter(jwtService), SecurityWebFiltersOrder.AUTHORIZATION)
             .build()
     }
 

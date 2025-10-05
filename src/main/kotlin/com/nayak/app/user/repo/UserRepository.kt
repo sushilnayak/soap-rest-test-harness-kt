@@ -15,7 +15,7 @@ interface UserRepository : CoroutineCrudRepository<User, UUID> {
     @Query(
         """
         SELECT * FROM users  
-        AND (:racfId IS NULL OR racf_id ILIKE CONCAT('%', :racfId, '%'))
+        WHERE (:racfId IS NULL OR racf_id ILIKE CONCAT('%', :racfId, '%'))
         ORDER BY created_at DESC
         LIMIT :limit OFFSET :offset
     """

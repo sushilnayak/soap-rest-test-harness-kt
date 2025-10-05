@@ -30,6 +30,7 @@ class ExecutionService(
     private val xmlMapper = XmlMapper()
 
     suspend fun executeRequest(request: ExecutionRequest): Either<DomainError, ExecutionResponse> {
+        println(request)
         return try {
             val startTime = System.currentTimeMillis()
 

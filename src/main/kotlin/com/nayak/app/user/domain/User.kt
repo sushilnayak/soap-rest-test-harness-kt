@@ -22,7 +22,7 @@ data class User(
     val updatedAt: LocalDateTime = LocalDateTime.now(),
 
     @Column("is_enabled")
-    val isEnabled: Boolean = true,
+    val isEnabled: Boolean = false,
 
     ) {
     fun isAdmin(): Boolean = roles.contains("ADMIN")

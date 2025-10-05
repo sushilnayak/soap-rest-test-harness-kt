@@ -3,34 +3,101 @@ CREATE
 EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Create users table
-CREATE TABLE IF NOT EXISTS users
+-- drop table users;
+-- CREATE TABLE IF NOT EXISTS users
+-- (
+--     id            UUID PRIMARY KEY         DEFAULT uuid_generate_v4(),
+--     racf_id       VARCHAR(50) UNIQUE NOT NULL,
+--     password_hash VARCHAR(255)       NOT NULL,
+--     roles         TEXT[] DEFAULT '{"ROLE_USER"}',
+--     created_at    TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+--     updated_at    TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+-- );
+-- ALTER TABLE users
+--     ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT true NOT NULL,
+--     ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+--
+-- -- Create index for better query performance
+-- CREATE INDEX IF NOT EXISTS idx_users_is_enabled ON users(is_enabled);
+-- CREATE INDEX IF NOT EXISTS idx_users_racf_id ON users(racf_id);
+-- CREATE INDEX IF NOT EXISTS idx_users_roles ON users USING GIN(roles);
+--
+-- -- Add comments
+-- COMMENT ON COLUMN users.is_enabled IS 'Whether the user account is enabled';
+-- COMMENT ON COLUMN users.deleted_at IS 'Timestamp when user was soft deleted';
+create table public.users
 (
-    id            UUID PRIMARY KEY         DEFAULT uuid_generate_v4(),
-    user_id       VARCHAR(50) UNIQUE NOT NULL,
-    password_hash VARCHAR(255)       NOT NULL,
-    roles         TEXT[] DEFAULT '{"USER"}',
-    created_at    TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at    TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    id            uuid      default uuid_generate_v4() not null
+        primary key,
+    racf_id       varchar(50)                          not null
+        constraint users_user_id_key
+            unique,
+    password_hash varchar(255)                         not null,
+    roles         text[]    default '{USER}'::text[],
+    created_at    timestamp default CURRENT_TIMESTAMP,
+    updated_at    timestamp default CURRENT_TIMESTAMP,
+    is_enabled    boolean   default true               not null
 );
+
+alter table public.users
+    owner to postgres;
+
+create index idx_users_user_id
+    on public.users (racf_id);
+
+
 
 -- Create projects table
-CREATE TABLE IF NOT EXISTS projects
-(
-    id         UUID PRIMARY KEY         DEFAULT uuid_generate_v4(),
-    name       VARCHAR(255) NOT NULL,
-    type       VARCHAR(10)  NOT NULL CHECK (type IN ('REST', 'SOAP')),
-    meta       JSONB        NOT NULL,
-    owner_id   VARCHAR(50)  NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (owner_id) REFERENCES users (user_id) ON DELETE CASCADE
-);
+-- CREATE TABLE IF NOT EXISTS projects
+-- (
+--     id         UUID PRIMARY KEY         DEFAULT uuid_generate_v4(),
+--     name       VARCHAR(255) NOT NULL,
+--     type       VARCHAR(10)  NOT NULL CHECK (type IN ('REST', 'SOAP')),
+--     meta       JSONB        NOT NULL,
+--     owner_id   VARCHAR(50)  NOT NULL,
+--     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+--     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+--
+-- );
 
 -- Create indexes
-CREATE INDEX IF NOT EXISTS idx_users_user_id ON users (user_id);
-CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects (owner_id);
-CREATE INDEX IF NOT EXISTS idx_projects_type ON projects (type);
-CREATE INDEX IF NOT EXISTS idx_projects_meta ON projects USING GIN (meta);
+-- CREATE INDEX IF NOT EXISTS idx_users_user_id ON users (user_id);
+-- CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects (owner_id);
+-- CREATE INDEX IF NOT EXISTS idx_projects_type ON projects (type);
+-- CREATE INDEX IF NOT EXISTS idx_projects_meta ON projects USING GIN (meta);
+
+
+create table public.projects
+(
+    id                uuid                     default uuid_generate_v4() not null
+        primary key,
+    name              varchar(255)                                        not null,
+    type              varchar(10)                                         not null
+        constraint projects_type_check
+            check ((type)::text = ANY ((ARRAY ['REST'::character varying, 'SOAP'::character varying])::text[])),
+    meta              jsonb                                               not null,
+    owner_id          varchar(50)                                         not null
+        references public.users (racf_id)
+            on delete cascade,
+    created_at        timestamp with time zone default CURRENT_TIMESTAMP,
+    updated_at        timestamp with time zone default CURRENT_TIMESTAMP,
+    request_template  jsonb                                               not null,
+    response_template jsonb                                               not null
+);
+
+alter table public.projects
+    owner to postgres;
+
+create index idx_projects_owner_id
+    on public.projects (owner_id);
+
+create index idx_projects_type
+    on public.projects (type);
+
+create index idx_projects_meta
+    on public.projects using gin (meta);
+
+
 
 -- Create updated_at trigger function
 CREATE

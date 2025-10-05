@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 
 @RestController
-@RequestMapping("/api/insomnia")
+@RequestMapping("/api/execution/execute")
 @Tag(name = "Insomnia", description = "Insomnia Interface API")
 class InsomniaController(private val executionService: ExecutionService) {
 
