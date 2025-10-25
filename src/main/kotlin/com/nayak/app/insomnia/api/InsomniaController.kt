@@ -50,6 +50,7 @@ data class ExecutionRequest(
     val queryParams: Map<String, String> = emptyMap(),
 
     // Authentication configuration
+    //TODO we won't get this for Insomnia at least
     val authConfig: AuthConfig? = null,
 
     // Timeout configuration
@@ -60,15 +61,12 @@ data class ExecutionRequest(
 )
 
 data class AuthConfig(
-    val required: Boolean = false,
-    val tokenUrl: String? = null,
-    val clientId: String? = null,
-    val clientSecret: String? = null,
-    val audience: String? = null,
-    val scope: String? = null,
-    val grantType: String = "client_credentials",
-    val additionalParams: Map<String, String> = emptyMap(),
-    val cacheToken: Boolean = true // Whether to cache the token
+    val authHeaderKey: String,
+    val authResponseAttribute: String,
+    val authPayload: String,
+    val authTokenUrl: String,
+    val requiresAuth: Boolean = false,
+    val audience: String? = null,  // extracted from authPayload.aud
 )
 
 data class RetryConfig(

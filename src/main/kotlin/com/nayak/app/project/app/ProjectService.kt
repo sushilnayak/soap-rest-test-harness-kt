@@ -13,7 +13,6 @@ import com.nayak.app.project.model.Project
 import com.nayak.app.project.model.ProjectFilter
 import com.nayak.app.project.model.ProjectType
 import com.nayak.app.project.repo.ProjectRepository
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
 import org.springframework.dao.DataIntegrityViolationException
@@ -23,17 +22,8 @@ import java.time.LocalDateTime
 import java.util.*
 
 @Service
-class ProjectService(private val projectRepository: ProjectRepository,  private val objectMapper: ObjectMapper) {
+class ProjectService(private val projectRepository: ProjectRepository, private val objectMapper: ObjectMapper) {
 
-//    suspend fun findAll(): Either<DomainError, Flow<Project>> {
-//        return try {
-//            val projects = projectRepository.findAll()
-//            projects.right()
-//
-//        } catch (e: Exception) {
-//            DomainError.Database("Failed to fetch projects ${e.message}").left()
-//        }
-//    }
 
     suspend fun createProject(
         name: String,
@@ -164,27 +154,20 @@ class ProjectService(private val projectRepository: ProjectRepository,  private 
     }
 
     @Transactional(readOnly = true)
-    suspend fun findAllPaginated(page: Int, size: Int) = either {
+    suspend fun findAllPaginated(type: ProjectType?, search: String?, page: Int, size: Int) = either {
         validatePagination(
             page,
             size
-        ) // don't need bind() as validatePagination now using Raise.
-//        validatePagination(
-//            page,
-//            size
-//        ).bind() // We need to use bind() otherwise either{} at top would not short circuit!
+        )
 
-//        val offset = (page * size).toLong() // Avoid Int * Int then cast. - Do the multiplication in Long to prevent overflow: page.toLong() * size.
-        val offset =
-            page.toLong() * size.toLong() // Avoid Int * Int then cast. - Do the multiplication in Long to prevent overflow: page.toLong() * size.
+        val offset = page.toLong() * size.toLong()
 
-        val total: Long = Either.catch { projectRepository.count() }
+        val total: Long = Either.catch { projectRepository.countByTypeAndName(type = type?.name, search = search) }
             .mapLeft { th -> DomainError.Database("Failed to count projects: ${th.message}") }
             .bind()
 
         val totalPages = ((total + size.toLong() - 1L) / size.toLong()).toInt()
 
-        // Optional early exit: if page is beyond last page, return empty content
         if (offset >= total && total > 0L) {
             return@either PagedResult(
                 content = emptyList(),
@@ -195,22 +178,13 @@ class ProjectService(private val projectRepository: ProjectRepository,  private 
             )
         }
         val projects: List<Project> = Either.catch {
-            projectRepository.findAllPaginated(size, offset).toList() // Flow<Project> -> List<Project>
+            projectRepository.findAllPaginated(type = type?.name, search = search, limit = size, offset = offset)
+                .toList() // Flow<Project> -> List<Project>
         }
             .mapLeft { th -> DomainError.Database("Failed to fetch page $page: ${th.message}") }
             .bind()
 
-        // 5) Map to DTOs and return
-        val projectDtos = projects.map { it.toDto() }
-//        val (project, total) = Either.catch {
-//            val projectFlow = projectRepository.findAllPaginated(size, offset)
-//            val projectList = projectFlow.toList()
-//            val count = projectRepository.count()
-//            projectList to count
-//        }.mapLeft { e -> DomainError.Database("Failed to find page $offset: $e") }.bind()
-//
-//        val projectDtos = project.map { it.toDto() }
-//        val totalPages = ((total + size - 1) / size).toInt()
+        val projectDtos = projects.map { it.toViewDto() }
 
         PagedResult(
             content = projectDtos,
@@ -318,11 +292,32 @@ class ProjectService(private val projectRepository: ProjectRepository,  private 
         updatedAt = updatedAt
     )
 
+    fun Project.toViewDto() = ProjectViewDto(
+        id = id!!,
+        name = name,
+        targetUrl = meta.path("targetUrl").asText(null),
+        type = type,
+        ownerId = ownerId,
+        createdAt = createdAt,
+        updatedAt = updatedAt
+    )
+
     fun Project.toAutocompleteDto() = ProjectAutocompleteDto(
         id = id!!,
         name = name,
         type = type
     )
+
+    fun Project.toNameIdAndDto() = ProjectWithNameAndId(
+        id = id!!,
+        name = name
+    )
+
+    suspend fun findProjectWithNameIds() = either {
+        Either.catch {
+            projectRepository.findAllProjectNameIds().toList()
+        }.mapLeft { th -> DomainError.Database("Failed to fetch") }.bind()
+    }
 }
 
 // DTOs
@@ -338,10 +333,25 @@ data class ProjectDto(
     val updatedAt: LocalDateTime
 )
 
+data class ProjectViewDto(
+    val id: UUID,
+    val name: String,
+    val targetUrl: String,
+    val type: ProjectType,
+    val ownerId: String,
+    val createdAt: LocalDateTime,
+    val updatedAt: LocalDateTime
+)
+
 data class ProjectAutocompleteDto(
     val id: UUID,
     val name: String,
     val type: ProjectType,
+)
+
+data class ProjectWithNameAndId(
+    val id: UUID,
+    val name: String
 )
 
 data class PagedResult<T>(

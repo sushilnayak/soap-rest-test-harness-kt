@@ -15,20 +15,20 @@ interface UserRepository : CoroutineCrudRepository<User, UUID> {
     @Query(
         """
         SELECT * FROM users  
-        WHERE (:racfId IS NULL OR racf_id ILIKE CONCAT('%', :racfId, '%'))
         ORDER BY created_at DESC
         LIMIT :limit OFFSET :offset
     """
     )
-    fun searchByRacfId(racfId: String?, limit: Int, offset: Long): Flow<User>
+    fun searchByRacfId(limit: Int, offset: Long): Flow<User>
+//        WHERE (:racfId IS NULL OR racf_id ILIKE CONCAT('%', :racfId, '%'))
 
     @Query(
         """
         SELECT COUNT(*) FROM users  
-        AND (:racfId IS NULL OR racf_id ILIKE CONCAT('%', :racfId, '%'))
     """
     )
-    suspend fun countByRacfId(racfId: String?): Long
+    suspend fun countByRacfId(): Long
+//        AND (:racfId IS NULL OR racf_id ILIKE CONCAT('%', :racfId, '%'))
 
     @Query(
         """

@@ -3,16 +3,12 @@ package com.nayak.app.user.api
 import com.nayak.app.common.errors.toHttpStatus
 import com.nayak.app.common.http.ApiResponse
 import com.nayak.app.user.app.AuthService
-import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.tags.Tag
 import jakarta.validation.Valid
 import jakarta.validation.constraints.NotBlank
 import org.springframework.http.ResponseEntity
-import org.springframework.web.bind.annotation.CrossOrigin
-import org.springframework.web.bind.annotation.PostMapping
-import org.springframework.web.bind.annotation.RequestBody
-import org.springframework.web.bind.annotation.RequestMapping
-import org.springframework.web.bind.annotation.RestController
+import org.springframework.security.core.annotation.AuthenticationPrincipal
+import org.springframework.web.bind.annotation.*
 
 
 @RestController
@@ -26,20 +22,27 @@ class AuthController(private val authService: AuthService) {
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Any>(error.message))
             },
-            ifRight = { tokenResponse ->
-                ResponseEntity.ok(ApiResponse.success(tokenResponse, "User Registered Successfully"))
-            }
+            ifRight = { response -> ResponseEntity.ok(ApiResponse.success(response)) }
         )
     }
 
+
     @PostMapping("/login")
-    @Operation(summary = "Log in", description = "Authenticate user and get JWT Token", tags = ["Authentication"])
-    suspend fun login(@Valid @RequestBody request: LoginRequest): ResponseEntity<ApiResponse<Any>> {
-        return authService.login(request.racfId, request.password).fold(
+    suspend fun login(@RequestBody request: LoginRequest): ResponseEntity<ApiResponse<Any>> =
+        authService.login(request.racfId, request.password).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Any>(error.message))
             },
-            ifRight = { tokenResponse -> ResponseEntity.ok(ApiResponse.success(tokenResponse, "Login Successful")) }
+            ifRight = { response -> ResponseEntity.ok(ApiResponse.success(response)) }
+        )
+
+    @GetMapping("/me")
+    suspend fun me(@AuthenticationPrincipal racfId: String?): ResponseEntity<*> {
+        return authService.me(racfId).fold(
+            ifLeft = { error ->
+                ResponseEntity.status(error.toHttpStatus()).body(ApiResponse.error<Any>(error.message))
+            },
+            ifRight = { response -> ResponseEntity.ok(ApiResponse.success(response)) }
         )
     }
 }

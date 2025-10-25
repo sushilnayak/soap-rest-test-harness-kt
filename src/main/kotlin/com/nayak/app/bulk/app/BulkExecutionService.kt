@@ -55,7 +55,7 @@ class BulkExecutionService(
             )
 
             // Parse Excel file
-            val excelData = parseExcelFileWithColors(excelFile, request.respectCellColors).fold(
+            val excelData: ExcelData = parseExcelFileWithColors(excelFile, request.respectCellColors).fold(
                 ifLeft = { return@withContext it.left() },
                 ifRight = { it }
             )
@@ -543,8 +543,8 @@ class BulkExecutionService(
         return try {
             // Extract auth config from project metadata
             val authConfig = extractAuthConfigFromProject(project)
-            if (authConfig?.required == true) {
-                val cacheKey = "${authConfig.tokenUrl}-${authConfig.clientId}"
+            if (authConfig?.requiresAuth == true) {
+                val cacheKey = "${authConfig.authTokenUrl}-${authConfig.audience}"
 
                 // Check if token is cached and not expired
                 val cached = tokenCache[cacheKey]
@@ -704,7 +704,7 @@ class BulkExecutionService(
 
     private fun extractHeaders(meta: JsonNode): Map<String, String> {
         val headers = mutableMapOf<String, String>()
-        meta.get("headers")?.fields()?.forEach { (key, value) ->
+        meta.get("headers")?.properties()?.forEach { (key, value) ->
             headers[key] = value.asText()
         }
         return headers
@@ -712,7 +712,7 @@ class BulkExecutionService(
 
     private fun extractQueryParams(meta: JsonNode): Map<String, String> {
         val params = mutableMapOf<String, String>()
-        meta.get("queryParams")?.fields()?.forEach { (key, value) ->
+        meta.get("queryParams")?.properties()?.forEach { (key, value) ->
             params[key] = value.asText()
         }
         return params
@@ -720,14 +720,26 @@ class BulkExecutionService(
 
     private fun extractAuthConfigFromProject(project: Project): AuthConfig? {
         return try {
-            val authMeta = project.meta.get("authConfig")
-            if (authMeta != null) {
-                objectMapper.treeToValue(authMeta, AuthConfig::class.java)
-            } else null
-        } catch (e: Exception) {
+            val authMeta = project.meta
+            val node = objectMapper.valueToTree<JsonNode>(authMeta)
+
+            val payloadNode = node.path("authPayload")
+            val payloadString = payloadNode.toString()
+            val audience = payloadNode.path("aud").asText(null) // extract "aud" if present
+
+            AuthConfig(
+                authHeaderKey = node.path("authHeaderKey").asText(),
+                authResponseAttribute = node.path("authResponseAttribute").asText(),
+                authPayload = payloadString,
+                authTokenUrl = node.path("authTokenUrl").asText(),
+                requiresAuth = node.path("requiresAuth").asBoolean(false),
+                audience = audience
+            )
+        } catch (_: Exception) {
             null
         }
     }
+
 
     suspend fun getBulkExecutionStatus(id: UUID): Either<DomainError, BulkExecution> {
         return try {

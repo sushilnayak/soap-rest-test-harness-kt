@@ -3,18 +3,14 @@ package com.nayak.app.user.app
 import arrow.core.Either
 import arrow.core.raise.either
 import arrow.core.raise.ensure
-import com.fasterxml.jackson.databind.JsonNode
+import arrow.core.raise.ensureNotNull
 import com.nayak.app.common.errors.DomainError
-import com.nayak.app.project.app.ProjectDto
-import com.nayak.app.project.model.Project
-import com.nayak.app.project.model.ProjectType
+import com.nayak.app.common.support.db
 import com.nayak.app.security.JwtService
 import com.nayak.app.user.domain.User
 import com.nayak.app.user.repo.UserRepository
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
-import java.time.LocalDateTime
-import java.util.UUID
 
 @Service
 class AuthService(
@@ -49,7 +45,7 @@ class AuthService(
                 accessToken = token,
                 expiresIn = expiresIn,
                 tokenType = "Bearer",
-                user = updatedUser.toDto()
+//                user = updatedUser.toDto()
             )
         }.mapLeft { e -> DomainError.Authentication("Token generation failed : ${e.message}") }.bind()
 
@@ -90,10 +86,22 @@ class AuthService(
                 accessToken = token,
                 expiresIn = expiresIn,
                 tokenType = "Bearer",
-                user = user.toDto()
+//                user = user.toDto()
             )
         }.mapLeft { e -> DomainError.Authentication("Authentication failed : ${e.message}") }.bind()
 
+    }
+
+    suspend fun me(racfId: String?): Either<DomainError, UserDto> = either {
+
+        ensure(!racfId.isNullOrBlank()) {
+            raise(DomainError.Validation("Invalid RacfId"))
+        }
+
+        val user = db("Fetching $racfId failed") { userRepository.findByRacfId(racfId) }.bind()
+        ensureNotNull(user) { DomainError.NotFound("User not found - ${racfId}") }
+
+        user.toDto()
     }
 //    suspend fun login(racfId: String, password: String): Either<DomainError, TokenResponse> {
 //        return try {
@@ -121,7 +129,7 @@ data class TokenResponse(
     val accessToken: String,
     val expiresIn: Long,
     val tokenType: String,
-    val user : UserDto
+//    val user : UserDto
 )
 
 fun User.toDto() = UserDto(

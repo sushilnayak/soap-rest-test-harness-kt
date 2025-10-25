@@ -10,7 +10,10 @@ import com.nayak.app.jobs.domain.JobProgressInfo
 import com.nayak.app.jobs.domain.JobStatus
 import com.nayak.app.jobs.domain.JobType
 import com.nayak.app.jobs.repo.JobExecutionRepository
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.stereotype.Service
@@ -201,9 +204,9 @@ class JobExecutionService(
             val job = jobExecutionRepository.findByExecutionId(executionId)
                 ?: return DomainError.NotFound("Job not found").left()
 
-            if (job.ownerId != ownerId) {
-                return DomainError.Forbidden("Access denied").left()
-            }
+//            if (job.ownerId != ownerId) {
+//                return DomainError.Forbidden("Access denied").left()
+//            }
 
             job.right()
         } catch (e: Exception) {

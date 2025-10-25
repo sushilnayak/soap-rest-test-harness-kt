@@ -40,7 +40,6 @@ class BulkExecutionController(private val bulkExecutionService: BulkExecutionSer
                 ifRight = { execution -> ResponseEntity.ok(ApiResponse.success(execution, "Bulk execution started")) }
             )
         }
-
     }
 
     @GetMapping("/{id}")

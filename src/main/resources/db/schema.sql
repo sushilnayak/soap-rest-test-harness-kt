@@ -84,7 +84,7 @@ create table public.projects
     request_template  jsonb                                               not null,
     response_template jsonb                                               not null
 );
-
+CREATE INDEX idx_projects_meta_base_url ON projects USING GIN ((meta -> 'baseUrl'));
 alter table public.projects
     owner to postgres;
 

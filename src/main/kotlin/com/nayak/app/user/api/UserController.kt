@@ -41,7 +41,7 @@ class UserController(private val userService: UserService) {
         )
     }
 
-    @PatchMapping("/users/{userId}/enable")
+    @PatchMapping("/{racfId}/enable")
     @PreAuthorize("hasRole('ADMIN')")
     @SecurityRequirement(name = "Bearer Authentication")
     @Operation(
@@ -60,7 +60,7 @@ class UserController(private val userService: UserService) {
         )
     }
 
-    @PatchMapping("/users/{userId}/disable")
+    @PatchMapping("/{racfId}/disable")
     @PreAuthorize("hasRole('ADMIN')")
     @SecurityRequirement(name = "Bearer Authentication")
     @Operation(
@@ -79,7 +79,7 @@ class UserController(private val userService: UserService) {
         )
     }
 
-    @PatchMapping("/users/{userId}/roles")
+    @PatchMapping("/{racfId}/roles")
     @PreAuthorize("hasRole('ADMIN')")
     @SecurityRequirement(name = "Bearer Authentication")
     @Operation(
@@ -101,7 +101,7 @@ class UserController(private val userService: UserService) {
         )
     }
 
-    @GetMapping("/users/{userId}")
+    @GetMapping("/{racfId}")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     @SecurityRequirement(name = "Bearer Authentication")
     @Operation(
@@ -120,14 +120,9 @@ class UserController(private val userService: UserService) {
         )
     }
 
-    @GetMapping("/users")
+
+    @GetMapping("/search")
     @PreAuthorize("hasRole('ADMIN')")
-    @SecurityRequirement(name = "Bearer Authentication")
-    @Operation(
-        summary = "Search users",
-        description = "Search and filter users with pagination (Admin only)",
-        tags = ["User Management"]
-    )
     suspend fun searchUsers(
         @Parameter(description = "Search by RACF ID (partial match)")
         @RequestParam(required = false) racfId: String?,
@@ -151,7 +146,6 @@ class UserController(private val userService: UserService) {
         )
     }
 }
-
 
 data class UpdateRoleRequest(
     @field:NotBlank(message = "Role cannot be blank")

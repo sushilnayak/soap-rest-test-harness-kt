@@ -43,7 +43,6 @@ class UserService(
         }.mapLeft { e ->
             DomainError.Database("Failed to enable user: ${e.message}")
         }.bind()
-
     }
 
     suspend fun disableUser(racfId: String): Either<DomainError, Unit> = either {
@@ -114,15 +113,14 @@ class UserService(
         either {
             ensure(page >= 0) { DomainError.Validation("Page must be >= 0") }
             ensure(size in 1..100) { DomainError.Validation("Size must be between 1 and 100") }
-
             val offset = (page * size).toLong()
 
             val (users, total) = Either.catch {
                 when (roleFilter) {
                     RoleFilter.ALL -> {
-                        val userFlow = userRepository.searchByRacfId(racfId, size, offset)
+                        val userFlow = userRepository.searchByRacfId(size, offset)
                         val userList = userFlow.toList()
-                        val count = userRepository.countByRacfId(racfId)
+                        val count = userRepository.countByRacfId()
                         userList to count
                     }
 

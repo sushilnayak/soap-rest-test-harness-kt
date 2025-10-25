@@ -1,6 +1,5 @@
 package com.nayak.app.security
 
-import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.server.reactive.ServerHttpRequest
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken
@@ -12,7 +11,7 @@ import org.springframework.web.server.WebFilterChain
 import reactor.core.publisher.Mono
 
 class JwtAuthenticationFilter(private val jwtService: JwtService) : WebFilter {
-    private val logger = LoggerFactory.getLogger(JwtAuthenticationFilter::class.java)
+
     override fun filter(exchange: ServerWebExchange, chain: WebFilterChain): Mono<Void> {
         val token = extractJwtFromRequest(exchange.request) ?: return chain.filter(exchange)
 

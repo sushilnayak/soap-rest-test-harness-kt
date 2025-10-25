@@ -5,7 +5,6 @@ import com.nayak.app.bulk.app.BulkExecutionService
 import com.nayak.app.common.errors.toHttpStatus
 import com.nayak.app.common.http.ApiResponse
 import com.nayak.app.project.app.ProjectService
-import com.nayak.app.project.model.ProjectFilter
 import com.nayak.app.project.model.ProjectType
 import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.Parameter
@@ -121,6 +120,20 @@ class ProjectController(
         )
     }
 
+    @GetMapping("/projects-with-ids")
+    @Operation(summary = "Get project with name and ids")
+    suspend fun getProjectWithNameAndIds(): ResponseEntity<ApiResponse<Any>> {
+        return projectService.findProjectWithNameIds().fold(
+            ifLeft = { error ->
+                ResponseEntity.status(error.toHttpStatus())
+                    .body(ApiResponse.error<Any>(error.message))
+            },
+            ifRight = { project ->
+                ResponseEntity.ok(ApiResponse.success(project))
+            }
+        )
+    }
+
     @GetMapping
     @Operation(
         summary = "Get all projects with pagination",
@@ -130,10 +143,16 @@ class ProjectController(
         @Parameter(description = "Page number (0-based)")
         @RequestParam(defaultValue = "0") @Min(0) page: Int,
 
+        @Parameter(description = "Filter by project type (SOAP or REST)")
+        @RequestParam(required = false) type: ProjectType?,
+
+        @Parameter(description = "Filter by search string")
+        @RequestParam(required = false) search: String?,
+
         @Parameter(description = "Page size (1-100)")
         @RequestParam(defaultValue = "20") @Min(1) @Max(100) size: Int
     ): ResponseEntity<ApiResponse<Any>> {
-        return projectService.findAllPaginated(page, size).fold(
+        return projectService.findAllPaginated(type = type, search = search, page = page, size = size).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus())
                     .body(ApiResponse.error<Any>(error.message))
@@ -144,70 +163,70 @@ class ProjectController(
         )
     }
 
-    @GetMapping("/search")
-    @Operation(
-        summary = "Search projects",
-        description = "Search projects with multiple filters and pagination"
-    )
-    suspend fun searchProjects(
-        @Parameter(description = "Search by project name (partial match)")
-        @RequestParam(required = false) name: String?,
-
-        @Parameter(description = "Filter by project type (SOAP or REST)")
-        @RequestParam(required = false) type: ProjectType?,
-
-        @Parameter(description = "Filter by owner ID")
-        @RequestParam(required = false) ownerId: String?,
-
-        @Parameter(description = "Filter by status: ALL, ACTIVE, INACTIVE, MY_PROJECTS")
-        @RequestParam(defaultValue = "ALL") filter: ProjectFilter,
-
-        @Parameter(description = "Page number (0-based)")
-        @RequestParam(defaultValue = "0") @Min(0) page: Int,
-
-        @Parameter(description = "Page size (1-100)")
-        @RequestParam(defaultValue = "20") @Min(1) @Max(100) size: Int
-    ): ResponseEntity<ApiResponse<Any>> {
-        return projectService.searchProjects(
-            name = name,
-            type = type,
-            ownerId = ownerId,
-            filter = filter,
-            page = page,
-            size = size
-        ).fold(
-            ifLeft = { error ->
-                ResponseEntity.status(error.toHttpStatus())
-                    .body(ApiResponse.error<Any>(error.message))
-            },
-            ifRight = { pagedResult ->
-                ResponseEntity.ok(ApiResponse.success(pagedResult, "Projects found successfully"))
-            }
-        )
-    }
-
-    @GetMapping("/autocomplete")
-    @Operation(
-        summary = "Autocomplete project names",
-        description = "Get project name suggestions for autocomplete (returns top 10 matches by default)"
-    )
-    suspend fun autocompleteProjects(
-        @Parameter(description = "Search query for autocomplete", required = true)
-        @RequestParam query: String,
-
-        @Parameter(description = "Maximum number of results (1-50)")
-        @RequestParam(defaultValue = "10") @Min(1) @Max(50) limit: Int
-    ): ResponseEntity<ApiResponse<Any>> {
-        return projectService.autocompleteProjects(query, limit).fold(
-            ifLeft = { error ->
-                ResponseEntity.status(error.toHttpStatus())
-                    .body(ApiResponse.error<Any>(error.message))
-            },
-            ifRight = { suggestions ->
-                ResponseEntity.ok(ApiResponse.success(suggestions, "Autocomplete results retrieved"))
-            }
-        )
-    }
+//    @GetMapping("/search")
+//    @Operation(
+//        summary = "Search projects",
+//        description = "Search projects with multiple filters and pagination"
+//    )
+//    suspend fun searchProjects(
+//        @Parameter(description = "Search by project name (partial match)")
+//        @RequestParam(required = false) name: String?,
+//
+//        @Parameter(description = "Filter by project type (SOAP or REST)")
+//        @RequestParam(required = false) type: ProjectType?,
+//
+//        @Parameter(description = "Filter by owner ID")
+//        @RequestParam(required = false) ownerId: String?,
+//
+//        @Parameter(description = "Filter by status: ALL, ACTIVE, INACTIVE, MY_PROJECTS")
+//        @RequestParam(defaultValue = "ALL") filter: ProjectFilter,
+//
+//        @Parameter(description = "Page number (0-based)")
+//        @RequestParam(defaultValue = "0") @Min(0) page: Int,
+//
+//        @Parameter(description = "Page size (1-100)")
+//        @RequestParam(defaultValue = "20") @Min(1) @Max(100) size: Int
+//    ): ResponseEntity<ApiResponse<Any>> {
+//        return projectService.searchProjects(
+//            name = name,
+//            type = type,
+//            ownerId = ownerId,
+//            filter = filter,
+//            page = page,
+//            size = size
+//        ).fold(
+//            ifLeft = { error ->
+//                ResponseEntity.status(error.toHttpStatus())
+//                    .body(ApiResponse.error<Any>(error.message))
+//            },
+//            ifRight = { pagedResult ->
+//                ResponseEntity.ok(ApiResponse.success(pagedResult, "Projects found successfully"))
+//            }
+//        )
+//    }
+//
+//    @GetMapping("/autocomplete")
+//    @Operation(
+//        summary = "Autocomplete project names",
+//        description = "Get project name suggestions for autocomplete (returns top 10 matches by default)"
+//    )
+//    suspend fun autocompleteProjects(
+//        @Parameter(description = "Search query for autocomplete", required = true)
+//        @RequestParam query: String,
+//
+//        @Parameter(description = "Maximum number of results (1-50)")
+//        @RequestParam(defaultValue = "10") @Min(1) @Max(50) limit: Int
+//    ): ResponseEntity<ApiResponse<Any>> {
+//        return projectService.autocompleteProjects(query, limit).fold(
+//            ifLeft = { error ->
+//                ResponseEntity.status(error.toHttpStatus())
+//                    .body(ApiResponse.error<Any>(error.message))
+//            },
+//            ifRight = { suggestions ->
+//                ResponseEntity.ok(ApiResponse.success(suggestions, "Autocomplete results retrieved"))
+//            }
+//        )
+//    }
 
     @GetMapping("/{id}/excel-template")
     @Operation(summary = "Generate Excel template for bulk execution")
