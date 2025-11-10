@@ -22,15 +22,6 @@ data class Project(
 
     @Column("response_template")
     val responseTemplate: JsonNode? = null,
-//    val httpEndpoint: String,
-//    val httpVerb: HttpMethod = HttpMethod.POST,
-//    val httpContentType: String = "application/json",
-//    val httpAcceptedContentType: String = "application/json",
-//    val httpAuthenticationRequired: Boolean = false,
-//    val httpJwtAudience: String? = null,
-//
-//    val templateHttpRequestBody : String,
-//    val templateHttpResponseBody: String,
 
     @Column("owner_id") val ownerId: String,
     @Column("created_at") val createdAt: LocalDateTime = LocalDateTime.now(),
@@ -40,14 +31,3 @@ data class Project(
 enum class ProjectType {
     SOAP, REST
 }
-
-enum class ProjectFilter {
-    ALL, ACTIVE, INACTIVE, MY_PROJECTS
-}
-
-data class ProjectSearchCriteria(
-    val name: String? = null,
-    val type: ProjectType? = null,
-    val ownerId: String? = null,
-    val filter: ProjectFilter = ProjectFilter.ALL
-)

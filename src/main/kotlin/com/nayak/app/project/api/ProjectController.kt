@@ -155,7 +155,7 @@ class ProjectController(
         return projectService.findAllPaginated(type = type, search = search, page = page, size = size).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus())
-                    .body(ApiResponse.error<Any>(error.message))
+                    .body(ApiResponse.error(error.message))
             },
             ifRight = { pagedResult ->
                 ResponseEntity.ok(ApiResponse.success(pagedResult, "Projects retrieved successfully"))
@@ -231,10 +231,9 @@ class ProjectController(
     @GetMapping("/{id}/excel-template")
     @Operation(summary = "Generate Excel template for bulk execution")
     suspend fun generateExcelTemplate(
-        @PathVariable id: UUID,
-        @AuthenticationPrincipal userId: String
+        @PathVariable id: UUID
     ): ResponseEntity<ByteArray> {
-        return bulkExecutionService.generateExcelTemplate(id, userId).fold(
+        return bulkExecutionService.generateExcelTemplate(id).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus()).build()
             },

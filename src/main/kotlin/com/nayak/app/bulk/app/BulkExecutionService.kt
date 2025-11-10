@@ -753,8 +753,7 @@ class BulkExecutionService(
     }
 
     suspend fun generateExcelTemplate(
-        projectId: UUID,
-        ownerId: String
+        projectId: UUID
     ): Either<DomainError, ByteArray> {
         return try {
             val project = projectService.findProjectById(projectId).fold(

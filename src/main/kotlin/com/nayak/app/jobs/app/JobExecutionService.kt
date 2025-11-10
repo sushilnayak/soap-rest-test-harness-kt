@@ -199,7 +199,10 @@ class JobExecutionService(
         }
     }
 
-    suspend fun getJobStatus(executionId: String, ownerId: String): Either<DomainError, JobExecution> {
+    suspend fun getJobStatus(
+        executionId: String
+//                             , ownerId: String
+    ): Either<DomainError, JobExecution> {
         return try {
             val job = jobExecutionRepository.findByExecutionId(executionId)
                 ?: return DomainError.NotFound("Job not found").left()

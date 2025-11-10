@@ -21,9 +21,12 @@ class JobController(private val jobExecutionService: JobExecutionService) {
     @Operation(summary = "Get job status by execution ID")
     suspend fun getJobStatus(
         @PathVariable executionId: String,
-        @AuthenticationPrincipal userId: String
+//        @AuthenticationPrincipal userId: String
     ): ResponseEntity<ApiResponse<Any>> {
-        return jobExecutionService.getJobStatus(executionId, userId).fold(
+        return jobExecutionService.getJobStatus(
+            executionId
+//            , userId
+        ).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus())
                     .body(ApiResponse.error<Any>(error.message))

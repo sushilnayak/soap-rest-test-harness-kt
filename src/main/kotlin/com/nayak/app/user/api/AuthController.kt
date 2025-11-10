@@ -26,7 +26,6 @@ class AuthController(private val authService: AuthService) {
         )
     }
 
-
     @PostMapping("/login")
     suspend fun login(@RequestBody request: LoginRequest): ResponseEntity<ApiResponse<Any>> =
         authService.login(request.racfId, request.password).fold(
