@@ -15,4 +15,6 @@ interface JobExecutionRepository : CoroutineCrudRepository<JobExecution, UUID> {
     suspend fun findByStatusAndNextRetryAtBefore(status: JobStatus, dateTime: LocalDateTime): List<JobExecution>
     suspend fun findByStatusIn(statuses: List<JobStatus>): List<JobExecution>
     suspend fun findByJobTypeAndOwnerIdOrderByCreatedAtDesc(jobType: JobType, ownerId: String): List<JobExecution>
+
+    suspend fun deleteJobExecutionByExecutionId(executionId: String): Int
 }

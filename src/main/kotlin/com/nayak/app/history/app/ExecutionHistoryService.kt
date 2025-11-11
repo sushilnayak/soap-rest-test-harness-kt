@@ -16,14 +16,16 @@ import com.nayak.app.history.domain.ExecutionHistoryItemDto
 import com.nayak.app.history.domain.ExecutionHistoryItemDto.BulkDetails
 import com.nayak.app.history.domain.ExecutionType
 import com.nayak.app.history.domain.HistorySearchType
+import com.nayak.app.jobs.repo.JobExecutionRepository
 import com.nayak.app.project.app.PagedResult
-import com.nayak.app.project.app.ProjectService
 import kotlinx.coroutines.flow.toList
 import org.apache.poi.ss.usermodel.*
 import org.apache.poi.xssf.streaming.SXSSFWorkbook
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.reactive.TransactionalOperator
+import org.springframework.transaction.reactive.executeAndAwait
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.time.Duration
@@ -36,7 +38,8 @@ import java.util.zip.ZipOutputStream
 @Service
 class ExecutionHistoryService(
     private val bulkExecutionRepository: BulkExecutionRepository,
-    private val projectService: ProjectService,
+    private val jobExecutionRepository: JobExecutionRepository,
+    private val transactionalOperator: TransactionalOperator,
     private val objectMapper: ObjectMapper
 ) {
     private val zipDateFmt = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
@@ -106,6 +109,37 @@ class ExecutionHistoryService(
         }
 
         rows
+    }
+
+    suspend fun deleteExecutionHistory(executionId: UUID): Either<DomainError, String> = either {
+
+        val exists = bulkExecutionRepository.existsById(executionId)
+        ensure(exists) {
+            DomainError.NotFound("Bulk execution $executionId not found")
+        }
+
+        transactionalOperator.executeAndAwait {
+            val jobsDeleted = try {
+                jobExecutionRepository.deleteJobExecutionByExecutionId(executionId.toString())
+            } catch (e: Exception) {
+                raise(DomainError.Database("Failed to delete job_executions for $executionId: ${e.message}"))
+            }
+
+            val bulkDeleted = try {
+                bulkExecutionRepository.deleteByIdAndReturnCount(executionId)
+
+            } catch (e: Exception) {
+                raise(DomainError.Database("Failed to delete bulk execution $executionId: ${e.message}"))
+            }
+
+            logger.info(
+                "Bulk Execution deleted count = {} and Job Execution deleted count = {} ",
+                bulkDeleted,
+                jobsDeleted
+            )
+
+            "Deletion completed successfully"
+        }
     }
 
     suspend fun getRowRequestBody(executionId: UUID, rowIndex: Int): Either<DomainError, String> = either {

@@ -32,6 +32,9 @@ interface BulkExecutionRepository : CoroutineCrudRepository<BulkExecution, UUID>
     fun findAllPaginated(racfId: String?, limit: Int, offset: Long): Flow<BulkExecution>
 
 
+    @Query("DELETE FROM th_kt_bulk_executions WHERE id = :id")
+    suspend fun deleteByIdAndReturnCount(id: UUID): Int
+
 //    @Query(
 //        """
 //        SELECT

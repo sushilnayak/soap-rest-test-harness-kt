@@ -55,6 +55,14 @@ class ExecutionHistoryController(
             historyService.getDetails(executionId).bind()
         }.toResponse()
 
+    @DeleteMapping("/{executionId}")
+    suspend fun deleteExecutionHistory(
+        @PathVariable executionId: UUID
+    ): ResponseEntity<ApiResponse<String>> =
+        either {
+            historyService.deleteExecutionHistory(executionId).bind()
+        }.toResponse()
+
 
     @GetMapping("/{executionId}/row/{rowIndex}/request")
     suspend fun downloadRowRequest(
