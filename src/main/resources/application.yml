@@ -35,6 +35,17 @@ logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level [%X{executionId:-}] [%X{jobType:-}] %logger{36} - %msg%n"
 
+bulk:
+  excel:
+    headers:
+      mode: dot
+      prefix: EXPECTED_
+    coercion:
+      strict-int: true
+      date-format: yyyy-MM-dd'T'HH:mm:ss
+    array:
+      first-element-only: true
+
 ---
 spring:
   config:

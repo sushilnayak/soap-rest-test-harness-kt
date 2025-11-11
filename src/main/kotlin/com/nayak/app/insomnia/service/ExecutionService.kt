@@ -43,9 +43,7 @@ class ExecutionService(
 
             // Prepare the request (pure). If this can fail, make it return Either and .bind() it here.
             val prepared = prepareRequest(request, authToken, request.authConfig?.authHeaderKey)
-            println(prepared)
-            println(request)
-            println(authToken)
+
             val (resp, dur) = try {
                 measureTimedValue {
                     executeWithRetry(prepared, request.retryConfig)
@@ -59,44 +57,11 @@ class ExecutionService(
                 statusCode = resp.statusCode,
                 headers = resp.headers,
                 responseBody = resp.body,
+                requestBody = objectMapper.writeValueAsString(prepared.body),
                 executionTimeMs = dur.toLong(DurationUnit.MILLISECONDS),
                 retryAttempts = resp.retryAttempts
             )
         }
-
-//    suspend fun executeRequest(request: ExecutionRequest): Either<DomainError, ExecutionResponse> {
-//        return try {
-//            val startTime = System.currentTimeMillis()
-//
-//            val authToken = if (request.authConfig?.requiresAuth == true) {
-//                getAuthToken(request.authConfig).fold(
-//                    ifLeft = { return it.left() },
-//                    ifRight = { it }
-//                )
-//            } else null
-//
-//            // Prepare the actual request
-//            val preparedRequest = prepareRequest(request, authToken, request.authConfig?.authHeaderKey)
-//
-//            // Execute with retry logic
-//            val response = executeWithRetry(preparedRequest, request.retryConfig)
-//
-//            val executionTime = System.currentTimeMillis() - startTime
-//
-//            ExecutionResponse(
-//                success = response.statusCode in 200..299,
-//                statusCode = response.statusCode,
-//                headers = response.headers,
-//                responseBody = response.body,
-//                executionTimeMs = executionTime,
-//                retryAttempts = response.retryAttempts
-//            ).right()
-//
-//        } catch (e: Exception) {
-//            logger.error("Request execution failed", e)
-//            DomainError.External("Request execution failed: ${e.message}").left()
-//        }
-//    }
 
     suspend fun getAuthToken(authConfig: AuthConfig): Either<DomainError, String> =
         either {

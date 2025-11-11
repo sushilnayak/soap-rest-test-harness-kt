@@ -29,7 +29,7 @@ class AuthService(
             .mapLeft { e -> DomainError.Authentication("Failed to encode password: ${e.message}") }
             .bind()
 
-        val user = User( racfId = racfId, passwordHash = hash, roles = setOf("USER"))
+        val user = User(racfId = racfId, passwordHash = hash, roles = setOf("USER"))
 
         val updatedUser = Either.catch { userRepository.save(user) }
             .mapLeft { e ->
@@ -45,28 +45,10 @@ class AuthService(
                 accessToken = token,
                 expiresIn = expiresIn,
                 tokenType = "Bearer",
-//                user = updatedUser.toDto()
             )
         }.mapLeft { e -> DomainError.Authentication("Token generation failed : ${e.message}") }.bind()
 
     }
-//        try {
-//            if (userRepository.existsByRacfId(racfId)) {
-//                DomainError.Conflict("User with racfId '$racfId' already exists").left()
-//            } else {
-//                val passwordHash = passwordEncoder.encode(password)
-//                val user = User(
-//                    racfId = racfId,
-//                    passwordHash = passwordHash,
-//                    roles = setOf("USER")
-//                )
-//                val savedUser = userRepository.save(user)
-//                savedUser.right()
-//            }
-//        } catch (e: Exception) {
-//            DomainError.Database("Failed to create user: ${e.message}").left()
-//        }
-
 
     suspend fun login(racfId: String, password: String): Either<DomainError, TokenResponse> = either {
 
@@ -86,7 +68,6 @@ class AuthService(
                 accessToken = token,
                 expiresIn = expiresIn,
                 tokenType = "Bearer",
-//                user = user.toDto()
             )
         }.mapLeft { e -> DomainError.Authentication("Authentication failed : ${e.message}") }.bind()
 
@@ -103,33 +84,12 @@ class AuthService(
 
         user.toDto()
     }
-//    suspend fun login(racfId: String, password: String): Either<DomainError, TokenResponse> {
-//        return try {
-//            val user =
-//                userRepository.findByRacfId(racfId) ?: return DomainError.NotFound("User not found with $racfId").left()
-//
-//            if (passwordEncoder.matches(password, user.passwordHash)) {
-//                val token = jwtService.generateToken(user.racfId, user.roles)
-//                val expiresIn = jwtService.getExpirationInMinutes() * 60 // in seconds
-//
-//                TokenResponse(
-//                    accessToken = token,
-//                    expiresIn = expiresIn,
-//                    tokenType = "Bearer"
-//                ).right()
-//
-//            } else DomainError.Validation("Invalid credential").left()
-//
-//        } catch (e: Exception) {
-//            DomainError.Database("Authentication failed : ${e.message}").left()
-//        }
 }
 
 data class TokenResponse(
     val accessToken: String,
     val expiresIn: Long,
     val tokenType: String,
-//    val user : UserDto
 )
 
 fun User.toDto() = UserDto(

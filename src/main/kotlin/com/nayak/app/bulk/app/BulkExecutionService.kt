@@ -7,6 +7,8 @@ import arrow.core.raise.ensureNotNull
 import arrow.core.right
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.nayak.app.bulk.config.BulkExcelProperties
+import com.nayak.app.bulk.config.HeaderMode
 import com.nayak.app.bulk.domain.*
 import com.nayak.app.bulk.repo.BulkExecutionRepository
 import com.nayak.app.common.errors.DomainError
@@ -20,8 +22,7 @@ import com.nayak.app.project.model.Project
 import com.nayak.app.project.model.ProjectType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.apache.poi.ss.usermodel.Cell
-import org.apache.poi.ss.usermodel.WorkbookFactory
+import org.apache.poi.ss.usermodel.*
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
@@ -29,7 +30,9 @@ import org.springframework.http.HttpMethod
 import org.springframework.stereotype.Service
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.text.SimpleDateFormat
 import java.util.*
+
 
 @Service
 class BulkExecutionService(
@@ -37,11 +40,12 @@ class BulkExecutionService(
     private val jobExecutionService: JobExecutionService,
     private val projectService: ProjectService,
     private val executionService: ExecutionService,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    private val excelProps: BulkExcelProperties
 ) {
     private val logger = LoggerFactory.getLogger(BulkExecutionService::class.java)
 
-    private val tokenCache = mutableMapOf<String, CachedToken>()
+    private val tokenCache = java.util.concurrent.ConcurrentHashMap<String, CachedToken>()
 
     suspend fun processBulkExecution(
         request: BulkExecutionRequest,
@@ -57,7 +61,7 @@ class BulkExecutionService(
                 parseExcelFileWithColors(excelFile, request.respectCellColors)
             }.bind()
 
-            // 3) Create + persist BulkExecution
+
             val bulkExecution = BulkExecution(
                 projectId = project.id!!,
                 ownerId = ownerId,
@@ -88,7 +92,6 @@ class BulkExecutionService(
                 )
             )
 
-            // 6) Create persistent job record
             val job = jobExecutionService.createJob(
                 executionId = executionId.toString(),
                 jobType = JobType.BULK_EXECUTION,
@@ -165,27 +168,31 @@ class BulkExecutionService(
             val sheet = workbook.getSheetAt(0)
 
             if (sheet.physicalNumberOfRows < 2) {
+                workbook.close()
                 return DomainError.Validation("Excel file must have at least a header row and one data row").left()
             }
 
-            // Get headers from first row
+            val formatter = DataFormatter(Locale.getDefault())
+            val evaluator = workbook.creationHelper.createFormulaEvaluator()
+            val isoDateTime = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss")
+
+            // Headers
             val headerRow = sheet.getRow(0)
             val headers = (0 until headerRow.physicalNumberOfCells).map {
                 headerRow.getCell(it)?.stringCellValue ?: "Column$it"
             }
 
-            // Parse data rows with color information
             val validRows = mutableListOf<ExcelRowData>()
             val skippedRows = mutableListOf<Int>()
 
             for (rowIndex in 1 until sheet.physicalNumberOfRows) {
                 val row = sheet.getRow(rowIndex) ?: continue
 
-                // Check if row should be skipped based on "Skip Case(Y/N)" column
+                // Skip logic
                 val skipColumnIndex = headers.indexOfFirst { it.equals("Skip Case(Y/N)", ignoreCase = true) }
                 if (skipColumnIndex >= 0) {
                     val skipCell = row.getCell(skipColumnIndex)
-                    val skipValue = skipCell?.stringCellValue?.trim()?.uppercase()
+                    val skipValue = skipCell?.let { formatter.formatCellValue(it, evaluator) }?.trim()?.uppercase()
                     if (skipValue == "Y" || skipValue == "YES") {
                         skippedRows.add(rowIndex)
                         continue
@@ -196,14 +203,31 @@ class BulkExecutionService(
 
                 headers.forEachIndexed { colIndex, header ->
                     val cell = row.getCell(colIndex)
-                    val cellValue = cell?.toString() ?: ""
+                    if (cell == null) {
+                        rowData[header] = CellData("", isExcluded = false, typeHint = "BLANK")
+                        return@forEachIndexed
+                    }
 
-                    // Check cell color if respectColors is enabled
-                    val isExcluded = if (respectColors && cell != null) {
-                        isCellColoredForExclusion(cell)
-                    } else false
+                    val typeHint = when {
+                        cell.cellType == CellType.NUMERIC && DateUtil.isCellDateFormatted(cell) -> "DATE"
+                        else -> cell.cellType.name
+                    }
 
-                    rowData[header] = CellData(cellValue, isExcluded)
+                    val cellValue = when {
+                        cell.cellType == CellType.NUMERIC && DateUtil.isCellDateFormatted(cell) ->
+                            isoDateTime.format(cell.dateCellValue)
+
+                        else ->
+                            formatter.formatCellValue(cell, evaluator).trim()
+                    }
+
+                    val isExcluded = if (respectColors) isCellColoredForExclusion(cell) else false
+
+                    rowData[header] = CellData(
+                        value = cellValue,
+                        isExcluded = isExcluded,
+                        typeHint = typeHint
+                    )
                 }
 
                 validRows.add(ExcelRowData(rowIndex, rowData))
@@ -241,11 +265,7 @@ class BulkExecutionService(
             // Update status to processing
             bulkExecutionRepository.save(execution.copy(status = BulkExecutionStatus.PROCESSING))
 
-            // Get authentication token once if caching is enabled
-            var cachedAuthToken: String? = null
-            if (request.cacheAuthToken) {
-                cachedAuthToken = getCachedAuthToken(project, request)
-            }
+            val cachedAuthToken: AuthHeader? = if (request.cacheAuthToken) getCachedAuthHeader(project) else null
 
             val results = mutableListOf<BulkExecutionResult>()
             var successCount = 0
@@ -317,6 +337,7 @@ class BulkExecutionService(
                                     rowIndex = rowData.originalRowIndex,
                                     success = response.success,
                                     statusCode = response.statusCode,
+                                    requestBody = response.requestBody,
                                     responseBody = response.responseBody,
                                     error = if (!response.success) "HTTP ${response.statusCode}" else null,
                                     executionTimeMs = response.executionTimeMs
@@ -403,110 +424,6 @@ class BulkExecutionService(
         }
     }
 
-
-//    private suspend fun processRows(
-//        execution: BulkExecution,
-//        project: Project,
-//        excelData: ExcelData,
-//        request: BulkExecutionRequest
-//    ) {
-//        try {
-//            // Update status to processing
-//            bulkExecutionRepository.save(execution.copy(status = BulkExecutionStatus.PROCESSING))
-//
-//            // Get authentication token once if caching is enabled
-//            var cachedAuthToken: String? = null
-//            if (request.cacheAuthToken) {
-//                cachedAuthToken = getCachedAuthToken(project, request)
-//            }
-//
-//            val results = mutableListOf<BulkExecutionResult>()
-//            var successCount = 0
-//            var failureCount = 0
-//
-//            // Process each row
-//            excelData.validRows.forEachIndexed { index, rowData ->
-//                try {
-//                    val executionRequest = buildExecutionRequest(
-//                        project,
-//                        rowData.data,
-//                        request,
-//                        cachedAuthToken
-//                    )
-//                    val startTime = System.currentTimeMillis()
-//
-//                    executionService.executeRequest(executionRequest).fold(
-//                        ifLeft = { error ->
-//                            results.add(
-//                                BulkExecutionResult(
-//                                    rowIndex = rowData.originalRowIndex,
-//                                    success = false,
-//                                    error = error.message,
-//                                    executionTimeMs = System.currentTimeMillis() - startTime
-//                                )
-//                            )
-//                            failureCount++
-//                        },
-//                        ifRight = { response ->
-//                            results.add(
-//                                BulkExecutionResult(
-//                                    rowIndex = rowData.originalRowIndex,
-//                                    success = response.success,
-//                                    statusCode = response.statusCode,
-//                                    responseBody = response.responseBody,
-//                                    error = if (!response.success) "HTTP ${response.statusCode}" else null,
-//                                    executionTimeMs = response.executionTimeMs
-//                                )
-//                            )
-//                            if (response.success) successCount++ else failureCount++
-//                        }
-//                    )
-//
-//                    // Update progress periodically
-//                    if ((index + 1) % 10 == 0) {
-//                        bulkExecutionRepository.save(
-//                            execution.copy(
-//                                processedRows = index + 1,
-//                                successfulRows = successCount,
-//                                failedRows = failureCount
-//                            )
-//                        )
-//                    }
-//                } catch (e: Exception) {
-//                    logger.error("Row processing failed for index $index", e)
-//                    results.add(
-//                        BulkExecutionResult(
-//                            rowIndex = rowData.originalRowIndex,
-//                            success = false,
-//                            error = "Processing error: ${e.message}"
-//                        )
-//                    )
-//                    failureCount++
-//                }
-//            }
-//
-//            // Final update
-//            bulkExecutionRepository.save(
-//                execution.copy(
-//                    status = BulkExecutionStatus.COMPLETED,
-//                    processedRows = excelData.validRows.size,
-//                    successfulRows = successCount,
-//                    failedRows = failureCount,
-//                    results = objectMapper.valueToTree(results)
-//                )
-//            )
-//
-//        } catch (e: Exception) {
-//            logger.error("Bulk execution processing failed", e)
-//            bulkExecutionRepository.save(
-//                execution.copy(
-//                    status = BulkExecutionStatus.FAILED,
-//                    errorDetails = e.message
-//                )
-//            )
-//        }
-//    }
-
     private fun logFailedRequest(request: ExecutionRequest, error: String) {
         try {
             // Create sanitized request for logging (remove sensitive data)
@@ -534,34 +451,46 @@ class BulkExecutionService(
         }
     }
 
-    private suspend fun getCachedAuthToken(
-        project: Project,
-        request: BulkExecutionRequest
-    ): String? {
+    private suspend fun getCachedAuthHeader(project: Project): AuthHeader? {
         return try {
-            // Extract auth config from project metadata
             val authConfig = extractAuthConfigFromProject(project)
-            if (authConfig?.requiresAuth == true) {
-                val cacheKey = "${authConfig.authTokenUrl}-${authConfig.audience}"
+            if (authConfig?.requiresAuth != true) return null
 
-                // Check if token is cached and not expired
-                val cached = tokenCache[cacheKey]
-                if (cached != null && !cached.isExpired()) {
-                    return cached.token
-                }
+            // Build robust cache key
+            val payloadHash = authConfig.authPayload.hashCode().toString()
+            val cacheKey = listOfNotNull(
+                authConfig.authTokenUrl,
+                authConfig.audience,
+                authConfig.authHeaderKey,
+                payloadHash
+            ).joinToString("|")
 
-                // Get new token and cache it
-                val newToken = executionService.getAuthToken(authConfig).fold(
-                    ifLeft = { null },
-                    ifRight = { it }
-                )
+            // Hit cache
+            tokenCache[cacheKey]?.takeIf { !it.isExpired() }?.let { cached ->
+                return AuthHeader(authConfig.authHeaderKey, cached.token)
+            }
 
-                newToken?.let {
-                    tokenCache[cacheKey] = CachedToken(it, System.currentTimeMillis() + 3300000) // 55 minutes
-                }
+            // Fetch fresh token
+            val tokenOrNull = executionService.getAuthToken(authConfig).fold(
+                ifLeft = { null },
+                ifRight = { it } // assuming this is the raw token string
+            )
 
-                newToken
-            } else null
+            if (tokenOrNull == null) return null
+
+            // Decide the final header value. If you need "Bearer ", add it here based on config.
+            val finalHeaderValue = when {
+                // If project/meta sets a prefix, prefer that (not shown — add to AuthConfig if you have it)
+                // else default to raw token:
+                else -> tokenOrNull
+            }
+
+            // If you can extract real expiry from token response, use that; else conservative default.
+            val defaultTtl = 55 * 60 * 1000L
+            val expiresAt = System.currentTimeMillis() + defaultTtl - 60_000
+
+            tokenCache[cacheKey] = CachedToken(finalHeaderValue, expiresAt)
+            AuthHeader(authConfig.authHeaderKey, finalHeaderValue)
         } catch (e: Exception) {
             logger.warn("Failed to get cached auth token", e)
             null
@@ -572,11 +501,10 @@ class BulkExecutionService(
         project: Project,
         rowData: Map<String, CellData>,
         request: BulkExecutionRequest,
-        cachedAuthToken: String? = null
+        cachedAuthToken: AuthHeader? = null
     ): ExecutionRequest {
         // Filter out excluded cells and replace placeholders
-        val filteredRowData = rowData.filterNot { it.value.isExcluded }
-            .mapValues { it.value.value }
+        val filteredRowData = rowData.filterNot { it.value.isExcluded }.mapValues { it.value.value }
 
         val processedMeta = replaceTemplateVariables(project.meta, filteredRowData)
 
@@ -591,7 +519,8 @@ class BulkExecutionService(
                 project,
                 targetUrl,
                 processedMeta,
-                filteredRowData,
+//                filteredRowData,
+                rowData.filterValues { !it.isExcluded },
                 cachedAuthToken
             )
         }.let { executionRequest ->
@@ -617,11 +546,15 @@ class BulkExecutionService(
         project: Project,
         targetUrl: String,
         meta: JsonNode,
-        rowData: Map<String, String>,
-        cachedAuthToken: String? = null
+        rowData: Map<String, CellData>,
+        cachedAuthHeader: AuthHeader? = null
     ): ExecutionRequest {
         val headers = extractHeaders(meta).toMutableMap()
-        cachedAuthToken?.let { headers["Authorization"] = "Bearer $it" }
+        cachedAuthHeader?.let { headers[it.key] = it.value }
+        // Reconstruct request body from rowData using the request template structure
+        val requestBody = project.requestTemplate?.let { template ->
+            reconstructJsonFromRowData(template, rowData, "")
+        } ?: meta.get("requestTemplate")
 
         return when (project.type) {
             ProjectType.REST -> ExecutionRequest(
@@ -629,7 +562,7 @@ class BulkExecutionService(
                 httpMethod = HttpMethod.valueOf(meta.get("method")?.asText() ?: "POST"),
                 requestType = ProjectType.REST,
                 headers = headers,
-                requestBody = meta.get("requestTemplate"),
+                requestBody = requestBody,
                 queryParams = extractQueryParams(meta)
             )
 
@@ -638,7 +571,7 @@ class BulkExecutionService(
                 httpMethod = HttpMethod.POST,
                 requestType = ProjectType.SOAP,
                 headers = headers,
-                requestBody = meta.get("requestTemplate")
+                requestBody = requestBody
             )
         }
     }
@@ -647,7 +580,7 @@ class BulkExecutionService(
         targetUrl: String,
         meta: JsonNode,
         rowData: Map<String, String>,
-        cachedAuthToken: String? = null
+        cachedAuthToken: AuthHeader? = null
     ): ExecutionRequest {
         // Convert SOAP template to REST JSON
         val soapTemplate = meta.get("requestTemplate")
@@ -659,7 +592,7 @@ class BulkExecutionService(
         } else null
 
         val headers = mutableMapOf("Content-Type" to "application/json")
-        cachedAuthToken?.let { headers["Authorization"] = "Bearer $it" }
+        cachedAuthToken?.let { headers[it.key] = it.value }
 
         return ExecutionRequest(
             targetUrl = targetUrl,
@@ -674,7 +607,7 @@ class BulkExecutionService(
         targetUrl: String,
         meta: JsonNode,
         rowData: Map<String, String>,
-        cachedAuthToken: String? = null
+        cachedAuthToken: AuthHeader? = null
     ): ExecutionRequest {
         // Convert REST JSON template to SOAP XML
         val jsonTemplate = meta.get("requestTemplate")
@@ -686,7 +619,7 @@ class BulkExecutionService(
         } else null
 
         val headers = mutableMapOf("Content-Type" to "text/xml; charset=utf-8")
-        cachedAuthToken?.let { headers["Authorization"] = "Bearer $it" }
+        cachedAuthToken?.let { headers[it.key] = it.value }
 
         return ExecutionRequest(
             targetUrl = targetUrl,
@@ -734,7 +667,6 @@ class BulkExecutionService(
             null
         }
     }
-
 
     suspend fun getBulkExecutionStatus(id: UUID): Either<DomainError, BulkExecution> {
         return try {
@@ -797,7 +729,11 @@ class BulkExecutionService(
         }
     }
 
-    private fun generateHeadersFromJson(jsonNode: JsonNode, prefix: String): List<String> {
+    private fun generateHeadersFromJson(
+        jsonNode: JsonNode,
+        prefix: String = excelProps.headers.prefix,
+        useDotNotation: Boolean = (excelProps.headers.mode == HeaderMode.DOT)
+    ): List<String> {
         val headers = mutableListOf<String>()
         val pathToHeader = mutableMapOf<String, String>()
 
@@ -809,13 +745,17 @@ class BulkExecutionService(
                         traverse(value, newPath)
                     }
                 }
-
                 node.isArray && node.size() > 0 -> {
-                    traverse(node[0], "$path[0]")
+                    // respect firstElementOnly flag (current behavior = true)
+                    if (excelProps.array.firstElementOnly) {
+                        traverse(node[0], "$path[0]")
+                    } else {
+                        // If later you support multiple indexes, extend here.
+                        traverse(node[0], "$path[0]")
+                    }
                 }
-
                 else -> {
-                    val headerName = generateHeaderName(path, pathToHeader)
+                    val headerName = generateHeaderName(path, pathToHeader, useDotNotation)
                     headers.add("$prefix$headerName")
                     pathToHeader[path] = headerName
                 }
@@ -826,13 +766,16 @@ class BulkExecutionService(
         return headers
     }
 
-    private fun generateHeaderName(path: String, existingHeaders: Map<String, String>): String {
-        val parts = path.split(".")
+    private fun generateHeaderName(
+        path: String,
+        existingHeaders: Map<String, String>,
+        useDotNotation: Boolean
+    ): String {
+        if (useDotNotation) return path
 
-        // Start with the last part
+        val parts = path.split(".")
         var candidate = parts.last().replace("[0]", "")
 
-        // Check for collisions and build up the path if needed
         var depth = 1
         while (existingHeaders.values.contains(candidate) && depth <= parts.size) {
             val startIndex = maxOf(0, parts.size - depth - 1)
@@ -840,10 +783,311 @@ class BulkExecutionService(
                 .joinToString("_") { it.replace("[0]", "") }
             depth++
         }
-
         return candidate
     }
+
+    /**
+     * Reconstructs a JSON structure from flat Excel row data, coercing values
+     * to the types defined by the corresponding leaf in the request template.
+     *
+     * - Objects: recurse field-by-field.
+     * - Arrays: reuses the template's first element shape (index [0]) and constructs a single element array,
+     *           consistent with your current header derivation strategy.
+     * - Leaves: coerce the string to template type (int/long/decimal/boolean/string/null).
+     *
+     * If a value is not provided in rowData, the original template value is kept.
+     */
+    /**
+     * Reconstructs JSON from flat Excel row data (CellData) using:
+     *  1) Excel cell type hints (NUMERIC/BOOLEAN/DATE/STRING/BLANK/FORMULA), and
+     *  2) The request template leaf type (int/long/decimal/boolean/string/null).
+     *
+     * Priority:
+     *  - If Excel says NUMERIC/BOOLEAN/DATE, coerce accordingly.
+     *  - Then align to the template leaf type (e.g., NUMERIC -> INT/LONG vs DECIMAL).
+     *  - If no override provided for a leaf, keep the template's original value.
+     */
+    private fun reconstructJsonFromRowData(
+        template: JsonNode,
+        rowData: Map<String, CellData>,
+        prefix: String = excelProps.headers.prefix,
+        useDotNotation: Boolean = (excelProps.headers.mode == HeaderMode.DOT)
+    ): JsonNode {
+        val pathToValue = mutableMapOf<String, String>()
+        val pathToHint = mutableMapOf<String, String?>()
+        val pathToHeader = mutableMapOf<String, String>()
+
+        // Build mapping from template paths to Excel header names (your existing convention),
+        // and capture both value and typeHint from the rowData.
+        fun buildPathMapping(node: JsonNode, path: String) {
+            when {
+                node.isObject -> {
+                    node.fields().forEach { (key, value) ->
+                        val newPath = if (path.isEmpty()) key else "$path.$key"
+                        buildPathMapping(value, newPath)
+                    }
+                }
+
+                node.isArray && node.size() > 0 -> {
+                    if (excelProps.array.firstElementOnly) {
+                        buildPathMapping(node[0], "$path[0]")
+                    } else {
+                        buildPathMapping(node[0], "$path[0]")
+                    }
+                }
+
+                else -> {
+//                    val headerName = generateHeaderName(path, pathToHeader)
+                    val headerName = generateHeaderName(path, pathToHeader, useDotNotation)
+                    pathToHeader[path] = headerName
+
+                    val fullHeaderName = "$prefix$headerName"
+                    rowData[fullHeaderName]?.let { cd ->
+                        pathToValue[path] = cd.value
+                        pathToHint[path] = cd.typeHint
+                    }
+                }
+            }
+        }
+
+        buildPathMapping(template, "")
+
+        fun reconstructNode(node: JsonNode, currentPath: String): JsonNode {
+            return when {
+                node.isObject -> {
+                    val obj = objectMapper.createObjectNode()
+                    node.fields().forEach { (key, value) ->
+                        val newPath = if (currentPath.isEmpty()) key else "$currentPath.$key"
+                        obj.set<JsonNode>(key, reconstructNode(value, newPath))
+                    }
+                    obj
+                }
+
+                node.isArray && node.size() > 0 -> {
+                    val arr = objectMapper.createArrayNode()
+                    val arrayPath = "$currentPath[0]"
+                    arr.add(reconstructNode(node[0], arrayPath))
+                    arr
+                }
+
+                else -> {
+                    // Leaf: if an override from Excel exists, coerce using hint + template leaf
+                    val raw = pathToValue[currentPath]
+                    if (raw != null) {
+                        val hint = pathToHint[currentPath]
+                        return coerceByHintThenTemplate(raw, hint, node)
+                    }
+                    // No override: keep template value
+                    node
+                }
+            }
+        }
+
+        return reconstructNode(template, "")
+    }
+
+
+    /**
+     * Coerces a string from Excel into the type of the given template leaf node.
+     * Supports:
+     *   - Integer types (INT, LONG, BIG_INTEGER): accepts "2", "2.0" (as 2), rejects non-whole decimals (logs warning)
+     *   - Decimal types (FLOAT, DOUBLE, BIG_DECIMAL): parses as BigDecimal
+     *   - Boolean: accepts true/false/1/0/yes/no (case-insensitive)
+     *   - String: returns as text
+     *   - Null (template null): empty -> null, else fall back to typed inference (string if nothing matches)
+     */
+    private fun coerceStringToTemplateType(value: String, templateLeaf: JsonNode): JsonNode {
+        val f = objectMapper.nodeFactory
+        val trimmed = value.trim()
+
+        // Common "empty" handling
+        if (trimmed.isEmpty()) return f.nullNode()
+
+        // If template says null, try to infer; if "null" literal, keep null
+        if (templateLeaf.isNull) {
+            if (trimmed.equals("null", ignoreCase = true)) return f.nullNode()
+            // Fall through to a best-effort inference; use string if nothing fits
+        }
+
+        // If template is boolean, parse loosely
+        if (templateLeaf.isBoolean) {
+            parseBooleanLoose(trimmed)?.let { return f.booleanNode(it) }
+            // If it doesn't parse as boolean, fall back to string to avoid silent lies
+            return f.textNode(trimmed)
+        }
+
+        // If template is numeric, match its numeric kind
+        if (templateLeaf.isNumber) {
+            val numberType = templateLeaf.numberType()  // INT, LONG, DOUBLE, BIG_DECIMAL, etc.
+            val bd = trimmed.toBigDecimalOrNull()
+
+            if (bd != null) {
+                when (numberType) {
+                    com.fasterxml.jackson.core.JsonParser.NumberType.INT -> {
+                        // Accept only whole numbers; coerce 2.0 -> 2
+                        val whole = bd.stripTrailingZeros().scale() <= 0
+                        if (whole) {
+                            val asLong = bd.longValueExactOrNull()
+                            return if (asLong != null && asLong in Int.MIN_VALUE..Int.MAX_VALUE)
+                                f.numberNode(asLong.toInt())
+                            else {
+                                // Out of int range: log & use long
+                                logger.warn("Value '{}' exceeds Int range; using Long", trimmed)
+                                f.numberNode((asLong ?: bd.toLong()))
+                            }
+                        } else {
+                            logger.warn("Non-whole '{}' for INT template; keeping template value", trimmed)
+                            return templateLeaf
+                        }
+                    }
+
+                    com.fasterxml.jackson.core.JsonParser.NumberType.LONG,
+                    com.fasterxml.jackson.core.JsonParser.NumberType.BIG_INTEGER -> {
+                        val whole = bd.stripTrailingZeros().scale() <= 0
+                        if (whole) {
+                            val asLong = bd.longValueExactOrNull() ?: bd.toLong()
+                            return f.numberNode(asLong)
+                        } else {
+                            logger.warn("Non-whole '{}' for LONG template; keeping template value", trimmed)
+                            return templateLeaf
+                        }
+                    }
+
+                    com.fasterxml.jackson.core.JsonParser.NumberType.FLOAT,
+                    com.fasterxml.jackson.core.JsonParser.NumberType.DOUBLE,
+                    com.fasterxml.jackson.core.JsonParser.NumberType.BIG_DECIMAL -> {
+                        // Keep high precision; caller/request serialization will choose float/double as needed
+                        return f.numberNode(bd)
+                    }
+
+                    else -> {
+                        // Fallback: just use BigDecimal
+                        return f.numberNode(bd)
+                    }
+                }
+            } else {
+                // Not a number; keep template to avoid lying
+                logger.warn("Non-numeric '{}' for numeric template; keeping template value", trimmed)
+                return templateLeaf
+            }
+        }
+
+        // If template is textual, respect that (including date/time strings, enums, etc.)
+        if (templateLeaf.isTextual) {
+            // Treat "null" specially
+            if (trimmed.equals("null", ignoreCase = true)) return f.nullNode()
+            return f.textNode(trimmed)
+        }
+
+        // For other node types (binary, POJO, etc.), default to text to avoid losing data
+        return f.textNode(trimmed)
+    }
+
+    /** Loose boolean parsing: true/false/1/0/yes/no (case-insensitive). */
+    private fun parseBooleanLoose(s: String): Boolean? = when (s.lowercase()) {
+        "true", "t", "yes", "y", "1" -> true
+        "false", "f", "no", "n", "0" -> false
+        else -> null
+    }
+
+    /** BigDecimal.longValueExact but null-safe */
+    private fun java.math.BigDecimal.longValueExactOrNull(): Long? = try {
+        this.toBigIntegerExact().longValueExact()
+    } catch (_: ArithmeticException) {
+        null
+    }
+
+    /**
+     * First coerce by Excel hint (NUMERIC/BOOLEAN/DATE/STRING/BLANK/FORMULA),
+     * then align to template leaf type (int/long/decimal/boolean/string/null).
+     */
+    private fun coerceByHintThenTemplate(raw: String, hint: String?, templateLeaf: JsonNode): JsonNode {
+        val f = objectMapper.nodeFactory
+        val s = raw.trim()
+        if (s.isEmpty() || s.equals("null", ignoreCase = true)) return f.nullNode()
+
+        // Step 1: Excel hint coercion
+        val hintedNode: JsonNode? = when (hint) {
+            "BOOLEAN" -> parseBooleanLoose(s)?.let { f.booleanNode(it) }
+            "DATE" -> f.textNode(s) // we already normalized dates to ISO strings upstream
+            "NUMERIC" -> s.toBigDecimalOrNull()?.let { f.numberNode(it) }
+            "STRING", "BLANK" -> f.textNode(s)
+            "FORMULA" -> {
+                // We only got the formatted result string; try number->boolean->text order.
+                s.toBigDecimalOrNull()?.let { f.numberNode(it) }
+                    ?: parseBooleanLoose(s)?.let { f.booleanNode(it) }
+                    ?: f.textNode(s)
+            }
+
+            else -> null
+        }
+
+        // If no hint (or unrecognized), try a reasonable default: number -> boolean -> string
+        val excelNode = hintedNode ?: (
+                s.toBigDecimalOrNull()?.let { f.numberNode(it) }
+                    ?: parseBooleanLoose(s)?.let { f.booleanNode(it) }
+                    ?: f.textNode(s)
+                )
+
+        // Step 2: Align with template leaf type
+        // - If template is textual: keep as text (avoid turning IDs like "0012" into number).
+        if (templateLeaf.isTextual) {
+            return f.textNode(s)
+        }
+
+        // - If template is boolean: force boolean (fallback to template value if unparsable).
+        if (templateLeaf.isBoolean) {
+            return parseBooleanLoose(s)?.let { f.booleanNode(it) } ?: templateLeaf
+        }
+
+        // - If template is null: keep excelNode (already coerced reasonably).
+        if (templateLeaf.isNull) {
+            return excelNode
+        }
+
+        // - If template is numeric: match its numeric kind (INT/LONG/BIG_INTEGER vs DECIMAL family).
+        if (templateLeaf.isNumber) {
+            val numType = templateLeaf.numberType()
+            val bd = s.toBigDecimalOrNull() ?: return templateLeaf // not a number: keep template
+
+            return when (numType) {
+                com.fasterxml.jackson.core.JsonParser.NumberType.INT -> {
+                    val whole = bd.stripTrailingZeros().scale() <= 0
+                    if (!whole) return templateLeaf // refuse 2.5 for INT
+                    val asLong = bd.longValueExactOrNull() ?: bd.toLong()
+                    if (asLong in Int.MIN_VALUE..Int.MAX_VALUE) f.numberNode(asLong.toInt())
+                    else {
+                        logger.warn("Value '{}' exceeds Int range; using Long in place of Int", s)
+                        f.numberNode(asLong)
+                    }
+                }
+
+                com.fasterxml.jackson.core.JsonParser.NumberType.LONG,
+                com.fasterxml.jackson.core.JsonParser.NumberType.BIG_INTEGER -> {
+                    val whole = bd.stripTrailingZeros().scale() <= 0
+                    if (!whole) return templateLeaf // refuse 2.5 for LONG
+                    val asLong = bd.longValueExactOrNull() ?: bd.toLong()
+                    f.numberNode(asLong)
+                }
+
+                com.fasterxml.jackson.core.JsonParser.NumberType.FLOAT,
+                com.fasterxml.jackson.core.JsonParser.NumberType.DOUBLE,
+                com.fasterxml.jackson.core.JsonParser.NumberType.BIG_DECIMAL -> {
+                    // Preserve exact decimal; Jackson will serialize as JSON number
+                    f.numberNode(bd)
+                }
+
+                else -> f.numberNode(bd)
+            }
+        }
+
+        // For any other rare node kinds, return the best-effort Excel-coerced node
+        return excelNode
+    }
+
 }
+
+data class AuthHeader(val key: String, val value: String)
 
 // Data classes for enhanced Excel processing
 data class ExcelData(
@@ -859,8 +1103,10 @@ data class ExcelRowData(
 
 data class CellData(
     val value: String,
-    val isExcluded: Boolean = false
+    val isExcluded: Boolean = false,
+    val typeHint: String? = null // e.g. "STRING", "NUMERIC", "BOOLEAN", "DATE", "BLANK", "FORMULA"
 )
+
 
 data class CachedToken(
     val token: String,

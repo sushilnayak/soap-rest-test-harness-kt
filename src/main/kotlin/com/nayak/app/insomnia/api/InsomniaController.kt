@@ -80,6 +80,7 @@ data class ExecutionResponse(
     val success: Boolean,
     val statusCode: Int,
     val headers: Map<String, List<String>>,
+    val requestBody: String?,
     val responseBody: String?,
     val executionTimeMs: Long,
     val error: String? = null,

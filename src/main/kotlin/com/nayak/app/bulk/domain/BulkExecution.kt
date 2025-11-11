@@ -55,7 +55,6 @@ data class BulkExecutionRequest(
     val projectId: UUID,
     val executeImmediately: Boolean = true,
     val conversionMode: ConversionMode = ConversionMode.NONE,
-//    val targetUrl: String? = null, // Override project URL if needed
     val cacheAuthToken: Boolean = true, // Cache token for entire bulk execution
     val respectCellColors: Boolean = true, // Use cell colors to exclude values
     val appendResults: Boolean = true // Append results to Excel with ACTUAL_ prefix
@@ -71,6 +70,7 @@ data class BulkExecutionResult(
     val rowIndex: Int,
     val success: Boolean,
     val statusCode: Int? = null,
+    val requestBody: String? = null,
     val responseBody: String? = null,
     val error: String? = null,
     val executionTimeMs: Long = 0
