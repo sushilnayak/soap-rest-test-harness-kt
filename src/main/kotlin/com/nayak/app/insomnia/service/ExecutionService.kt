@@ -43,7 +43,9 @@ class ExecutionService(
 
             // Prepare the request (pure). If this can fail, make it return Either and .bind() it here.
             val prepared = prepareRequest(request, authToken, request.authConfig?.authHeaderKey)
-
+            println(prepared)
+            println(request)
+            println(authToken)
             val (resp, dur) = try {
                 measureTimedValue {
                     executeWithRetry(prepared, request.retryConfig)

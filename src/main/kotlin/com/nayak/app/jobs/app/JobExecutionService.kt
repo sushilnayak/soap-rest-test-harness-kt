@@ -32,10 +32,11 @@ class JobExecutionService(
         jobType: JobType,
         ownerId: String,
         payload: Any,
-        maxRetries: Int = 3
+        maxRetries: Int = 3,
+        executionId: String = generateExecutionId()
     ): Either<DomainError, JobExecution> {
         return try {
-            val executionId = generateExecutionId()
+//            val executionId = generateExecutionId()
             val job = JobExecution(
                 jobType = jobType,
                 executionId = executionId,

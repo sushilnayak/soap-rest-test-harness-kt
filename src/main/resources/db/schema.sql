@@ -131,11 +131,13 @@ CREATE TRIGGER update_projects_updated_at
     ON projects
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+drop table th_kt_bulk_executions;
 -- Create bulk_executions table
-CREATE TABLE IF NOT EXISTS bulk_executions
+CREATE TABLE IF NOT EXISTS th_kt_bulk_executions
 (
     id              UUID PRIMARY KEY         DEFAULT uuid_generate_v4(),
     project_id      UUID        NOT NULL,
+    project_name VARCHAR(200) NOT NULL,
     owner_id        VARCHAR(50) NOT NULL,
     status          VARCHAR(20) NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'CANCELLED')),
     total_rows      INTEGER     NOT NULL     DEFAULT 0,
@@ -145,9 +147,9 @@ CREATE TABLE IF NOT EXISTS bulk_executions
     results         JSONB,
     error_details   TEXT,
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
-    FOREIGN KEY (owner_id) REFERENCES users (user_id) ON DELETE CASCADE
+    updated_at   TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP --,
+--     FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+--     FOREIGN KEY (owner_id) REFERENCES users (user_id) ON DELETE CASCADE
 );
 
 -- Create indexes for bulk_executions

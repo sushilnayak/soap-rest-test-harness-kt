@@ -7,7 +7,7 @@ import org.springframework.data.relational.core.mapping.Table
 import java.time.LocalDateTime
 import java.util.*
 
-@Table("bulk_executions")
+@Table("th_kt_bulk_executions")
 data class BulkExecution(
     @Id
     val id: UUID? = null,
@@ -17,6 +17,9 @@ data class BulkExecution(
 
     @Column("owner_id")
     val ownerId: String,
+
+    @Column("project_name")
+    val projectName: String,
 
     val status: BulkExecutionStatus,
 
@@ -52,7 +55,7 @@ data class BulkExecutionRequest(
     val projectId: UUID,
     val executeImmediately: Boolean = true,
     val conversionMode: ConversionMode = ConversionMode.NONE,
-    val targetUrl: String? = null, // Override project URL if needed
+//    val targetUrl: String? = null, // Override project URL if needed
     val cacheAuthToken: Boolean = true, // Cache token for entire bulk execution
     val respectCellColors: Boolean = true, // Use cell colors to exclude values
     val appendResults: Boolean = true // Append results to Excel with ACTUAL_ prefix

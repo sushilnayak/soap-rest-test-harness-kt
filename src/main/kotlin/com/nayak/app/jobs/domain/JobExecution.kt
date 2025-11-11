@@ -77,7 +77,12 @@ data class BulkExecutionJobPayload(
     val bulkExecutionId: UUID,
     val projectId: UUID,
     val request: BulkExecutionRequest,
-    val excelData: ExcelJobData
+    val excelData: ExcelJobData,
+)
+
+data class BulkExecutionResponseDto(
+    val bulkExecutionId: UUID,
+    val projectId: UUID
 )
 
 data class ExcelJobData(

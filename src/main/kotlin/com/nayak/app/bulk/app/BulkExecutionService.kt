@@ -2,6 +2,8 @@ package com.nayak.app.bulk.app
 
 import arrow.core.Either
 import arrow.core.left
+import arrow.core.raise.either
+import arrow.core.raise.ensureNotNull
 import arrow.core.right
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -39,41 +41,40 @@ class BulkExecutionService(
 ) {
     private val logger = LoggerFactory.getLogger(BulkExecutionService::class.java)
 
-    // Cache for authentication tokens during bulk execution
     private val tokenCache = mutableMapOf<String, CachedToken>()
 
     suspend fun processBulkExecution(
         request: BulkExecutionRequest,
         excelFile: InputStream,
         ownerId: String
-    ): Either<DomainError, JobExecution> = withContext(Dispatchers.IO) {
-        try {
-            // Get project details
-            val project = projectService.findProjectById(request.projectId).fold(
-                ifLeft = { return@withContext it.left() },
-                ifRight = { it }
-            )
+    ): Either<DomainError, BulkExecutionResponseDto> =
+        either {
+            val project = projectService.findProjectById(request.projectId).bind()
 
-            // Parse Excel file
-            val excelData: ExcelData = parseExcelFileWithColors(excelFile, request.respectCellColors).fold(
-                ifLeft = { return@withContext it.left() },
-                ifRight = { it }
-            )
+            ensureNotNull(project) { DomainError.NotFound("Project id not found with id $request.projectId") }
 
-            // Create bulk execution record
+            val excelData = withContext(Dispatchers.IO) {
+                parseExcelFileWithColors(excelFile, request.respectCellColors)
+            }.bind()
+
+            // 3) Create + persist BulkExecution
             val bulkExecution = BulkExecution(
-                projectId = request.projectId,
+                projectId = project.id!!,
                 ownerId = ownerId,
+                projectName = project.name,
                 status = BulkExecutionStatus.PENDING,
                 totalRows = excelData.validRows.size
             )
 
             val savedExecution = bulkExecutionRepository.save(bulkExecution)
 
-            // Create persistent job for execution
+            val executionId = ensureNotNull(savedExecution.id) {
+                DomainError.Database("BulkExecution persisted without id")
+            }
+
             val jobPayload = BulkExecutionJobPayload(
-                bulkExecutionId = savedExecution.id!!,
-                projectId = request.projectId,
+                bulkExecutionId = executionId,
+                projectId = project.id,
                 request = request,
                 excelData = ExcelJobData(
                     headers = excelData.headers,
@@ -87,29 +88,26 @@ class BulkExecutionService(
                 )
             )
 
+            // 6) Create persistent job record
             val job = jobExecutionService.createJob(
+                executionId = executionId.toString(),
                 jobType = JobType.BULK_EXECUTION,
                 ownerId = ownerId,
                 payload = jobPayload,
                 maxRetries = 2
-            ).fold(
-                ifLeft = { return@withContext it.left() },
-                ifRight = { it }
-            )
+            ).bind()
 
             if (request.executeImmediately) {
-                // Execute job asynchronously with persistent tracking
                 jobExecutionService.executeJobAsync(job) { jobExecution ->
                     executeBulkJob(jobExecution)
                 }
             }
 
-            job.right()
-        } catch (e: Exception) {
-            logger.error("Bulk execution setup failed", e)
-            DomainError.Database("Bulk execution setup failed: ${e.message}").left()
+            BulkExecutionResponseDto(jobPayload.bulkExecutionId, jobPayload.projectId)
+        }.mapLeft { e ->
+            logger.error("Bulk execution setup failed: ${e.message}", e)
+            e
         }
-    }
 
     private suspend fun executeBulkJob(job: JobExecution) {
         val executionId = job.executionId
@@ -583,10 +581,7 @@ class BulkExecutionService(
         val processedMeta = replaceTemplateVariables(project.meta, filteredRowData)
 
         // Determine target URL
-        val targetUrl = request.targetUrl ?: when (project.type) {
-            ProjectType.REST -> processedMeta.get("baseUrl")?.asText() ?: ""
-            ProjectType.SOAP -> processedMeta.get("wsdlUrl")?.asText() ?: ""
-        }
+        val targetUrl = project.meta.path("targetUrl").asText(null)
 
         // Handle conversion modes
         return when (request.conversionMode) {
