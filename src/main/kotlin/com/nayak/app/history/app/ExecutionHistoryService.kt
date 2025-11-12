@@ -8,7 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.nayak.app.bulk.domain.BulkExecution
 import com.nayak.app.bulk.repo.BulkExecutionRepository
-import com.nayak.app.bulk.repo.BulkExecutionRowProjection
+import com.nayak.app.bulk.repo.ResultRowProjection
 import com.nayak.app.bulk.repo.RowBodyProjection
 import com.nayak.app.common.errors.DomainError
 import com.nayak.app.history.domain.ExecutionArtifact
@@ -96,20 +96,26 @@ class ExecutionHistoryService(
         )
     }
 
-
-    suspend fun getDetails(executionId: UUID): Either<DomainError, List<BulkExecutionRowProjection>> = either {
-
-        val exists = bulkExecutionRepository.existsById(executionId)
-        ensure(exists) { DomainError.NotFound("No bulk execution found with id=$executionId") }
-
-        val rows = try {
-            bulkExecutionRepository.findRowsByBulkId(executionId).toList()
-        } catch (e: Exception) {
-            raise(DomainError.Database("Failed to load execution details: ${e.message}"))
+    suspend fun getDetails(executionId: UUID): Either<DomainError, List<ResultRowProjection>> = either {
+        ensure(bulkExecutionRepository.existsById(executionId)) {
+            DomainError.NotFound("No bulk execution found with id=$executionId")
         }
-
+        val rows = bulkExecutionRepository.findRowsByBulkId(executionId).toList()
         rows
     }
+//    suspend fun getDetails(executionId: UUID): Either<DomainError, List<BulkExecutionRowProjection>> = either {
+//
+//        val exists = bulkExecutionRepository.existsById(executionId)
+//        ensure(exists) { DomainError.NotFound("No bulk execution found with id=$executionId") }
+//
+//        val rows = try {
+//            bulkExecutionRepository.findRowsByBulkId(executionId).toList()
+//        } catch (e: Exception) {
+//            raise(DomainError.Database("Failed to load execution details: ${e.message}"))
+//        }
+//
+//        rows
+//    }
 
     suspend fun deleteExecutionHistory(executionId: UUID): Either<DomainError, String> = either {
 
@@ -141,28 +147,44 @@ class ExecutionHistoryService(
             "Deletion completed successfully"
         }
     }
-
     suspend fun getRowRequestBody(executionId: UUID, rowIndex: Int): Either<DomainError, String> = either {
-        val exists = bulkExecutionRepository.existsById(executionId)
-        ensure(exists) { DomainError.NotFound("No bulk execution found with id=$executionId") }
-
-        val body = bulkExecutionRepository.findRequestBodyByBulkIdAndRowIndex(executionId, rowIndex)
-        ensure(!body.isNullOrBlank()) {
+        ensure(bulkExecutionRepository.existsById(executionId)) { DomainError.NotFound("No bulk execution found with id=$executionId") }
+        val row = bulkExecutionRepository.findRequestBody(executionId, rowIndex)
+        ensure(row?.body?.isNotBlank() == true) {
             DomainError.NotFound("Request body not present for execution=$executionId row=$rowIndex")
         }
-        body
+        row!!.body!!
     }
 
     suspend fun getRowResponseBody(executionId: UUID, rowIndex: Int): Either<DomainError, String> = either {
-        val exists = bulkExecutionRepository.existsById(executionId)
-        ensure(exists) { DomainError.NotFound("No bulk execution found with id=$executionId") }
-
-        val body = bulkExecutionRepository.findResponseBodyByBulkIdAndRowIndex(executionId, rowIndex)
-        ensure(!body.isNullOrBlank()) {
+        ensure(bulkExecutionRepository.existsById(executionId)) { DomainError.NotFound("No bulk execution found with id=$executionId") }
+        val row = bulkExecutionRepository.findResponseBody(executionId, rowIndex)
+        ensure(row?.body?.isNotBlank() == true) {
             DomainError.NotFound("Response body not present for execution=$executionId row=$rowIndex")
         }
-        body
+        row!!.body!!
     }
+//    suspend fun getRowRequestBody(executionId: UUID, rowIndex: Int): Either<DomainError, String> = either {
+//        val exists = bulkExecutionRepository.existsById(executionId)
+//        ensure(exists) { DomainError.NotFound("No bulk execution found with id=$executionId") }
+//
+//        val body = bulkExecutionRepository.findRequestBodyByBulkIdAndRowIndex(executionId, rowIndex)
+//        ensure(!body.isNullOrBlank()) {
+//            DomainError.NotFound("Request body not present for execution=$executionId row=$rowIndex")
+//        }
+//        body
+//    }
+//
+//    suspend fun getRowResponseBody(executionId: UUID, rowIndex: Int): Either<DomainError, String> = either {
+//        val exists = bulkExecutionRepository.existsById(executionId)
+//        ensure(exists) { DomainError.NotFound("No bulk execution found with id=$executionId") }
+//
+//        val body = bulkExecutionRepository.findResponseBodyByBulkIdAndRowIndex(executionId, rowIndex)
+//        ensure(!body.isNullOrBlank()) {
+//            DomainError.NotFound("Response body not present for execution=$executionId row=$rowIndex")
+//        }
+//        body
+//    }
 
     suspend fun downloadAllRequestsZip(executionId: UUID): Either<DomainError, Pair<String, ByteArray>> = either {
         ensure(bulkExecutionRepository.existsById(executionId)) {

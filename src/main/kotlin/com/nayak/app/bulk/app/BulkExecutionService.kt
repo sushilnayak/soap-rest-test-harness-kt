@@ -11,6 +11,8 @@ import com.nayak.app.bulk.config.BulkExcelProperties
 import com.nayak.app.bulk.config.HeaderMode
 import com.nayak.app.bulk.domain.*
 import com.nayak.app.bulk.repo.BulkExecutionRepository
+import com.nayak.app.bulk.repo.BulkExecutionResultsWriteRepository
+import com.nayak.app.bulk.repo.BulkExecutionRowsWriteRepository
 import com.nayak.app.common.errors.DomainError
 import com.nayak.app.insomnia.api.AuthConfig
 import com.nayak.app.insomnia.api.ExecutionRequest
@@ -41,7 +43,9 @@ class BulkExecutionService(
     private val projectService: ProjectService,
     private val executionService: ExecutionService,
     private val objectMapper: ObjectMapper,
-    private val excelProps: BulkExcelProperties
+    private val excelProps: BulkExcelProperties,
+    private val resultsWriteRepo: BulkExecutionResultsWriteRepository,
+    private val rowsWriteRepo: BulkExecutionRowsWriteRepository? = null
 ) {
     private val logger = LoggerFactory.getLogger(BulkExecutionService::class.java)
 
@@ -283,71 +287,76 @@ class BulkExecutionService(
 
             // Process each row
             excelData.validRows.forEachIndexed { index, rowData ->
+                val rowIndex = rowData.originalRowIndex
+                val testCaseId = rowData.data["Test Case ID"]?.value?.takeIf { it.isNotBlank() }
+                val description = rowData.data["Description"]?.value?.takeIf { it.isNotBlank() }
+
                 try {
-                    // Set row-specific MDC context
-                    MDC.put("rowIndex", rowData.originalRowIndex.toString())
+                    MDC.put("rowIndex", rowIndex.toString())
                     MDC.put("currentRow", "${index + 1}/${excelData.validRows.size}")
 
-                    val executionRequest = buildExecutionRequest(
-                        project,
-                        rowData.data,
-                        request,
-                        cachedAuthToken
+                    // Optionally persist row header
+                    rowsWriteRepo?.upsertRowHeader(
+                        bulkId = execution.id!!,
+                        rowIndex = rowIndex,
+                        testCaseId = testCaseId,
+                        description = description
                     )
-                    val startTime = System.currentTimeMillis()
+
+                    val executionRequest = buildExecutionRequest(project, rowData.data, request, cachedAuthToken)
+
+                    // Serialize request body (JsonNode?) to compact string for DB write
+                    val requestBodyJsonString =
+                        executionRequest.requestBody?.let { objectMapper.writeValueAsString(it) }
+
+                    // Record the request up-front (so we have it even if HTTP fails)
+                    resultsWriteRepo.upsertRequest(
+                        bulkId = execution.id!!,
+                        rowIndex = rowIndex,
+                        testCaseId = testCaseId,
+                        description = description,
+                        requestBody = requestBodyJsonString
+                    )
+
+                    val start = System.currentTimeMillis()
 
                     executionService.executeRequest(executionRequest).fold(
                         ifLeft = { error ->
-                            logger.warn(
-                                "Row execution failed: rowIndex={}, error={}",
-                                rowData.originalRowIndex, error.message
-                            )
+                            val execMs = (System.currentTimeMillis() - start).toInt()
+                            logger.warn("Row execution failed: rowIndex={}, error={}", rowIndex, error.message)
+                            logFailedRequest(executionRequest, error.message ?: "error")
 
-                            // Log sanitized request for debugging
-                            logFailedRequest(executionRequest, error.message)
-
-                            results.add(
-                                BulkExecutionResult(
-                                    rowIndex = rowData.originalRowIndex,
-                                    success = false,
-                                    error = error.message,
-                                    executionTimeMs = System.currentTimeMillis() - startTime
-                                )
+                            resultsWriteRepo.upsertFailure(
+                                bulkId = execution.id!!,
+                                rowIndex = rowIndex,
+                                testCaseId = testCaseId,
+                                description = description,
+                                success = false,
+                                error = error.message ?: "Execution error",
+                                executionTimeMs = execMs
                             )
                             failureCount++
                         },
-                        ifRight = { response ->
-                            if (response.success) {
-                                logger.debug(
-                                    "Row execution succeeded: rowIndex={}, statusCode={}, duration={}ms",
-                                    rowData.originalRowIndex, response.statusCode, response.executionTimeMs
-                                )
-                            } else {
-                                logger.warn(
-                                    "Row execution returned error: rowIndex={}, statusCode={}, duration={}ms",
-                                    rowData.originalRowIndex, response.statusCode, response.executionTimeMs
-                                )
+                        ifRight = { resp ->
+                            val execMs = resp.executionTimeMs
 
-                                // Log sanitized request for debugging
-                                logFailedRequest(executionRequest, "HTTP ${response.statusCode}")
-                            }
+                            val responseBodyJsonString =
+                                resp.responseBody?.let { objectMapper.writeValueAsString(it) }
 
-                            results.add(
-                                BulkExecutionResult(
-                                    rowIndex = rowData.originalRowIndex,
-                                    success = response.success,
-                                    statusCode = response.statusCode,
-                                    requestBody = response.requestBody,
-                                    responseBody = response.responseBody,
-                                    error = if (!response.success) "HTTP ${response.statusCode}" else null,
-                                    executionTimeMs = response.executionTimeMs
-                                )
+                            resultsWriteRepo.patchWithResponse(
+                                bulkId = execution.id!!,
+                                rowIndex = rowIndex,
+                                responseBody = responseBodyJsonString,
+                                statusCode = resp.statusCode,
+                                success = resp.success,
+                                error = if (resp.success) null else "HTTP ${resp.statusCode}",
+                                executionTimeMs = execMs.toInt()
                             )
-                            if (response.success) successCount++ else failureCount++
+                            if (resp.success) successCount++ else failureCount++
                         }
                     )
 
-                    // Update progress periodically
+                    // Progress every 10 rows (unchanged)
                     if ((index + 1) % 10 == 0) {
                         jobExecutionService.updateJobProgress(
                             executionId, JobProgressInfo(
@@ -355,7 +364,7 @@ class BulkExecutionService(
                                 processedItems = index + 1,
                                 successfulItems = successCount,
                                 failedItems = failureCount,
-                                currentItem = "Row ${rowData.originalRowIndex}"
+                                currentItem = "Row $rowIndex"
                             )
                         )
 
@@ -368,22 +377,20 @@ class BulkExecutionService(
                         )
                     }
                 } catch (e: Exception) {
-                    logger.error(
-                        "Row processing failed: rowIndex={}, index={}",
-                        rowData.originalRowIndex, index, e
-                    )
-                    results.add(
-                        BulkExecutionResult(
-                            rowIndex = rowData.originalRowIndex,
-                            success = false,
-                            error = "Processing error: ${e.message}"
-                        )
+                    val execMs = null // unknown
+                    logger.error("Row processing failed: rowIndex={}, index={}", rowIndex, index, e)
+                    resultsWriteRepo.upsertFailure(
+                        bulkId = execution.id!!,
+                        rowIndex = rowIndex,
+                        testCaseId = testCaseId,
+                        description = description,
+                        success = false,
+                        error = "Processing error: ${e.message}",
+                        executionTimeMs = execMs
                     )
                     failureCount++
                 } finally {
-                    // Clear row-specific MDC
-                    MDC.remove("rowIndex")
-                    MDC.remove("currentRow")
+                    MDC.remove("rowIndex"); MDC.remove("currentRow")
                 }
             }
 
@@ -404,7 +411,7 @@ class BulkExecutionService(
                     processedRows = excelData.validRows.size,
                     successfulRows = successCount,
                     failedRows = failureCount,
-                    results = objectMapper.valueToTree(results)
+                    // results = objectMapper.valueToTree(results)
                 )
             )
 
@@ -419,6 +426,7 @@ class BulkExecutionService(
                 execution.copy(
                     status = BulkExecutionStatus.FAILED,
                     errorDetails = e.message
+                    // results untouched
                 )
             )
         }

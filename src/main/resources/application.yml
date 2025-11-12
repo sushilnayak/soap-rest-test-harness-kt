@@ -45,6 +45,13 @@ bulk:
       date-format: yyyy-MM-dd'T'HH:mm:ss
     array:
       first-element-only: true
+cleanup:
+  enabled: true
+  retention-days: 15
+  batch-size: 10
+  cron: 0 0 10 * * *
+  zone: Europe/London
+
 
 ---
 spring:
