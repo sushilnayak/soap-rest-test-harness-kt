@@ -207,3 +207,134 @@ DROP TRIGGER IF EXISTS update_job_executions_updated_at ON job_executions;
 CREATE TRIGGER update_job_executions_updated_at
         BEFORE UPDATE ON job_executions
                      FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+
+
+--- FROM DATABASE
+
+create table public.th_kt_bulk_executions
+(
+    id              uuid                     default uuid_generate_v4() not null
+        primary key,
+    project_id      uuid                                                not null,
+    project_name    varchar(200)                                        not null,
+    owner_id        varchar(50)                                         not null,
+    status          varchar(20)                                         not null
+        constraint th_kt_bulk_executions_status_check
+            check ((status)::text = ANY
+                   ((ARRAY ['PENDING'::character varying, 'PROCESSING'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying])::text[])),
+    total_rows      integer                  default 0                  not null,
+    processed_rows  integer                  default 0                  not null,
+    successful_rows integer                  default 0                  not null,
+    failed_rows     integer                  default 0                  not null,
+    results         jsonb,
+    error_details   text,
+    created_at      timestamp with time zone default CURRENT_TIMESTAMP,
+    updated_at      timestamp with time zone default CURRENT_TIMESTAMP
+);
+
+alter table public.th_kt_bulk_executions
+    owner to postgres;
+
+create table public.bulk_execution_rows
+(
+    bulk_execution_id uuid    not null
+        constraint fk_rows_bulk
+            references public.th_kt_bulk_executions
+            on delete cascade,
+    row_index         integer not null,
+    test_case_id      text,
+    description       text,
+    primary key (bulk_execution_id, row_index)
+);
+
+alter table public.bulk_execution_rows
+    owner to postgres;
+
+create index idx_bulk_rows_exec
+    on public.bulk_execution_rows (bulk_execution_id);
+
+create table public.bulk_execution_results
+(
+    bulk_execution_id uuid    not null
+        constraint fk_bulk_exec
+            references public.th_kt_bulk_executions
+            on delete cascade,
+    row_index         integer not null,
+    test_case_id      text,
+    description       text,
+    request_body      jsonb,
+    response_body     jsonb,
+    status_code       integer,
+    success           boolean,
+    error             text,
+    execution_time_ms integer,
+    created_at        timestamp with time zone default CURRENT_TIMESTAMP,
+    primary key (bulk_execution_id, row_index)
+);
+
+alter table public.bulk_execution_results
+    owner to postgres;
+
+create index idx_bulk_results_exec
+    on public.bulk_execution_results (bulk_execution_id);
+
+create index idx_bulk_results_exec_success
+    on public.bulk_execution_results (bulk_execution_id, success);
+
+create index idx_bulk_results_exec_tcid
+    on public.bulk_execution_results (bulk_execution_id, test_case_id);
+
+create table public.job_executions
+(
+    id                uuid                     default uuid_generate_v4() not null
+        primary key,
+    job_type          varchar(50)                                         not null
+        constraint job_executions_job_type_check
+            check ((job_type)::text = ANY
+                   ((ARRAY ['BULK_EXECUTION'::character varying, 'TEST_GENERATION'::character varying, 'TEMPLATE_PROCESSING'::character varying])::text[])),
+    execution_id      varchar(50)                                         not null
+        unique,
+    status            varchar(20)                                         not null
+        constraint job_executions_status_check
+            check ((status)::text = ANY
+                   ((ARRAY ['PENDING'::character varying, 'RUNNING'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying, 'CANCELLED'::character varying, 'RETRY_SCHEDULED'::character varying])::text[])),
+    owner_id          varchar(50)                                         not null
+        references public.users (racf_id)
+            on delete cascade,
+    job_payload       jsonb                                               not null,
+    retry_count       integer                  default 0                  not null,
+    max_retries       integer                  default 3                  not null,
+    next_retry_at     timestamp with time zone,
+    started_at        timestamp with time zone,
+    completed_at      timestamp with time zone,
+    error_message     text,
+    error_details     jsonb,
+    progress_info     jsonb,
+    created_at        timestamp with time zone default CURRENT_TIMESTAMP,
+    updated_at        timestamp with time zone default CURRENT_TIMESTAMP,
+    bulk_execution_id uuid
+);
+
+alter table public.job_executions
+    owner to postgres;
+
+create index idx_job_executions_owner_id
+    on public.job_executions (owner_id);
+
+create index idx_job_executions_status
+    on public.job_executions (status);
+
+create index idx_job_executions_job_type
+    on public.job_executions (job_type);
+
+create index idx_job_executions_retry_schedule
+    on public.job_executions (status, next_retry_at)
+    where ((status)::text = 'RETRY_SCHEDULED'::text);
+
+create index idx_job_executions_created_at
+    on public.job_executions (created_at);
+
+create index idx_job_executions_execution_id
+    on public.job_executions (execution_id);
+
