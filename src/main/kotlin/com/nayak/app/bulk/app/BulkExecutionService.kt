@@ -687,55 +687,181 @@ class BulkExecutionService(
         }
     }
 
-    suspend fun generateExcelTemplate(
-        projectId: UUID
-    ): Either<DomainError, ByteArray> {
-        return try {
-            val project = projectService.findProjectById(projectId).fold(
-                ifLeft = { return it.left() },
-                ifRight = { it }
-            )
+    private data class HeaderSpec(
+        val headers: List<String>,
+        val pathToHeader: Map<String, String>
+    )
 
-            val workbook = XSSFWorkbook()
-            val sheet = workbook.createSheet("Template")
+    private fun buildHeaderSpec(
+        jsonNode: JsonNode,
+        prefix: String = excelProps.headers.prefix,
+        useDotNotation: Boolean = (excelProps.headers.mode == HeaderMode.DOT)
+    ): HeaderSpec {
+        val headers = mutableListOf<String>()
+        val pathToHeader = mutableMapOf<String, String>()
 
-            // Generate headers
-            val headers = mutableListOf<String>()
-
-            // Add default columns
-            headers.addAll(listOf("Test Case ID", "Skip Case(Y/N)", "Description"))
-
-            // Add request template headers
-            project.requestTemplate?.let { template ->
-                val requestHeaders = generateHeadersFromJson(template, "")
-                headers.addAll(requestHeaders)
+        fun generateHeaderName(
+            path: String,
+            existing: Map<String, String>,
+            useDot: Boolean
+        ): String {
+            if (useDot) return path
+            val parts = path.split(".")
+            var candidate = parts.last().replace("[0]", "")
+            var depth = 1
+            while (existing.values.contains(candidate) && depth <= parts.size) {
+                val startIndex = maxOf(0, parts.size - depth - 1)
+                candidate = parts.subList(startIndex, parts.size)
+                    .joinToString("_") { it.replace("[0]", "") }
+                depth++
             }
-
-            // Add response template headers with EXPECTED_ prefix
-            project.responseTemplate?.let { template ->
-                val responseHeaders = generateHeadersFromJson(template, "EXPECTED_")
-                headers.addAll(responseHeaders)
-            }
-
-            // Create header row
-            val headerRow = sheet.createRow(0)
-            headers.forEachIndexed { index, header ->
-                headerRow.createCell(index).setCellValue(header)
-            }
-
-            // Auto-size columns
-            headers.indices.forEach { sheet.autoSizeColumn(it) }
-
-            val outputStream = ByteArrayOutputStream()
-            workbook.write(outputStream)
-            workbook.close()
-
-            outputStream.toByteArray().right()
-        } catch (e: Exception) {
-            logger.error("Excel template generation failed", e)
-            DomainError.Database("Excel template generation failed: ${e.message}").left()
+            return candidate
         }
+
+        fun traverse(node: JsonNode, path: String) {
+            when {
+                node.isObject -> {
+                    node.fields().forEach { (k, v) ->
+                        val np = if (path.isEmpty()) k else "$path.$k"
+                        traverse(v, np)
+                    }
+                }
+
+                node.isArray -> {
+                    if (excelProps.array.firstElementOnly) {
+                        if (node.size() > 0) traverse(node[0], "$path[0]")
+                    } else {
+                        for (i in 0 until node.size()) traverse(node[i], "$path[$i]")
+                    }
+                }
+
+                else -> {
+                    val name = generateHeaderName(path, pathToHeader, useDotNotation)
+                    pathToHeader[path] = name
+                    headers += "$prefix$name"
+                }
+            }
+        }
+
+        traverse(jsonNode, "")
+        return HeaderSpec(headers, pathToHeader)
     }
+
+    private fun flattenToRowValues(
+        node: JsonNode?,
+        spec: HeaderSpec,
+        requiresHeaderPrefix: Boolean = true
+    ): Map<String, String> {
+        if (node == null) return emptyMap()
+        val out = mutableMapOf<String, String>()
+
+        fun put(path: String, value: JsonNode) {
+            val header = spec.pathToHeader[path] ?: return
+            val s = when {
+                value.isTextual -> value.asText()
+                value.isNumber || value.isBoolean || value.isNull -> value.toString()
+                else -> objectMapper.writeValueAsString(value) // object/array -> compact JSON
+            }
+            if (requiresHeaderPrefix) {
+                out["${excelProps.headers.prefix}$header".replaceFirst(
+                    excelProps.headers.prefix,
+                    ""
+                ) // already included in spec
+                    .let { if (excelProps.headers.prefix.isNotEmpty()) excelProps.headers.prefix + it else it }
+                ] = s
+            } else {
+                out[header] = s
+            }
+
+        }
+
+        fun walk(n: JsonNode, path: String) {
+            when {
+                n.isObject -> n.fields().forEach { (k, v) ->
+                    val np = if (path.isEmpty()) k else "$path.$k"
+                    walk(v, np)
+                }
+
+                n.isArray -> {
+                    if (excelProps.array.firstElementOnly) {
+                        if (n.size() > 0) walk(n[0], "$path[0]")
+                    } else {
+                        for (i in 0 until n.size()) walk(n[i], "$path[$i]")
+                    }
+                }
+
+                else -> put(path, n)
+            }
+        }
+
+        walk(node, "")
+        return out
+    }
+
+    suspend fun generateExcelTemplate(
+        projectId: UUID,
+        includeValues: Boolean = false
+    ): Either<DomainError, ByteArray> = try {
+        val project = projectService.findProjectById(projectId).fold(
+            ifLeft = { return it.left() },
+            ifRight = { it }
+        )
+
+        val workbook = XSSFWorkbook()
+        val sheet = workbook.createSheet("Template")
+
+        // 1) default columns
+        val baseHeaders = listOf("Test Case ID", "Skip Case(Y/N)", "Description")
+
+        // 2) request headers + mapping
+        val reqSpec = project.requestTemplate?.let { buildHeaderSpec(it, prefix = "") }
+        // 3) response headers + mapping (EXPECTED_)
+        val respSpec = project.responseTemplate?.let { buildHeaderSpec(it, prefix = "EXPECTED_") }
+
+        // 4) Create header row
+        val headers = buildList {
+            addAll(baseHeaders)
+            reqSpec?.headers?.let(::addAll)
+            respSpec?.headers?.let(::addAll)
+        }
+
+        val headerRow = sheet.createRow(0)
+        headers.forEachIndexed { i, h -> headerRow.createCell(i).setCellValue(h) }
+
+        // 5) Optionally add one data row filled with defaults from templates
+        if (includeValues) {
+            val row = sheet.createRow(1)
+
+            // base columns defaults
+            row.createCell(0).setCellValue("") // Test Case ID
+            row.createCell(1).setCellValue("") // Skip Case(Y/N)
+            row.createCell(2).setCellValue("") // Description
+
+            // flatten request
+            val reqVals = reqSpec?.let { flattenToRowValues(project.requestTemplate, it, false) } ?: emptyMap()
+            // flatten expected response
+            val respVals = respSpec?.let { flattenToRowValues(project.responseTemplate, it) } ?: emptyMap()
+
+            // place values by header index
+            val values = reqVals + respVals
+            headers.forEachIndexed { idx, h ->
+                if (idx < 3) return@forEachIndexed
+                values[h]?.let { row.createCell(idx).setCellValue(it) }
+            }
+        }
+
+        // 6) autosize
+        headers.indices.forEach { sheet.autoSizeColumn(it) }
+
+        val bos = ByteArrayOutputStream()
+        workbook.write(bos)
+        workbook.close()
+        bos.toByteArray().right()
+    } catch (e: Exception) {
+        logger.error("Excel template generation failed", e)
+        DomainError.Database("Excel template generation failed: ${e.message}").left()
+    }
+
 
     private fun generateHeadersFromJson(
         jsonNode: JsonNode,
@@ -753,15 +879,19 @@ class BulkExecutionService(
                         traverse(value, newPath)
                     }
                 }
-                node.isArray && node.size() > 0 -> {
-                    // respect firstElementOnly flag (current behavior = true)
+
+                node.isArray -> {
+                    // When firstElementOnly = true, keep legacy behavior ([0] only)
                     if (excelProps.array.firstElementOnly) {
-                        traverse(node[0], "$path[0]")
+                        if (node.size() > 0) traverse(node[0], "$path[0]")
                     } else {
-                        // If later you support multiple indexes, extend here.
-                        traverse(node[0], "$path[0]")
+                        // Emit headers for each index that exists in the template JSON
+                        for (i in 0 until node.size()) {
+                            traverse(node[i], "$path[$i]")
+                        }
                     }
                 }
+
                 else -> {
                     val headerName = generateHeaderName(path, pathToHeader, useDotNotation)
                     headers.add("$prefix$headerName")
@@ -821,77 +951,109 @@ class BulkExecutionService(
         prefix: String = excelProps.headers.prefix,
         useDotNotation: Boolean = (excelProps.headers.mode == HeaderMode.DOT)
     ): JsonNode {
+        val pathToHeader = mutableMapOf<String, String>()
         val pathToValue = mutableMapOf<String, String>()
         val pathToHint = mutableMapOf<String, String?>()
-        val pathToHeader = mutableMapOf<String, String>()
+        val arrayIndexMap = mutableMapOf<String, MutableSet<Int>>() // basePath -> indices
 
-        // Build mapping from template paths to Excel header names (your existing convention),
-        // and capture both value and typeHint from the rowData.
-        fun buildPathMapping(node: JsonNode, path: String) {
-            when {
-                node.isObject -> {
-                    node.fields().forEach { (key, value) ->
-                        val newPath = if (path.isEmpty()) key else "$path.$key"
-                        buildPathMapping(value, newPath)
-                    }
-                }
-
-                node.isArray && node.size() > 0 -> {
-                    if (excelProps.array.firstElementOnly) {
-                        buildPathMapping(node[0], "$path[0]")
-                    } else {
-                        buildPathMapping(node[0], "$path[0]")
-                    }
-                }
-
-                else -> {
-//                    val headerName = generateHeaderName(path, pathToHeader)
-                    val headerName = generateHeaderName(path, pathToHeader, useDotNotation)
-                    pathToHeader[path] = headerName
-
-                    val fullHeaderName = "$prefix$headerName"
-                    rowData[fullHeaderName]?.let { cd ->
-                        pathToValue[path] = cd.value
-                        pathToHint[path] = cd.typeHint
-                    }
-                }
+        fun registerLeaf(path: String) {
+            val headerName = generateHeaderName(path, pathToHeader, useDotNotation)
+            pathToHeader[path] = headerName
+            val fullHeader = "$prefix$headerName"
+            rowData[fullHeader]?.let { cd ->
+                pathToValue[path] = cd.value
+                pathToHint[path] = cd.typeHint
             }
         }
 
-        buildPathMapping(template, "")
+        fun scanTemplate(node: JsonNode, path: String) {
+            when {
+                node.isObject -> node.fields().forEach { (k, v) ->
+                    val np = if (path.isEmpty()) k else "$path.$k"
+                    scanTemplate(v, np)
+                }
 
-        fun reconstructNode(node: JsonNode, currentPath: String): JsonNode {
-            return when {
+                node.isArray -> {
+                    if (excelProps.array.firstElementOnly) {
+                        if (node.size() > 0) scanTemplate(node[0], "$path[0]")
+                    } else {
+                        for (i in 0 until node.size()) scanTemplate(node[i], "$path[$i]")
+                    }
+                }
+
+                else -> registerLeaf(path)
+            }
+        }
+        scanTemplate(template, "")
+
+        // In DOT mode we can discover extra indices directly from headers (prefix + dot path)
+        if (useDotNotation && !excelProps.array.firstElementOnly) {
+            rowData.keys.asSequence()
+                .filter { it.startsWith(prefix) }
+                .map { it.removePrefix(prefix) } // now a DOT path like "a.b[2].c[1].d"
+                .forEach { fullPath ->
+                    collectIndicesFromDotPath(fullPath, arrayIndexMap)
+                }
+        }
+
+        fun reconstruct(node: JsonNode, path: String): JsonNode =
+            when {
                 node.isObject -> {
                     val obj = objectMapper.createObjectNode()
-                    node.fields().forEach { (key, value) ->
-                        val newPath = if (currentPath.isEmpty()) key else "$currentPath.$key"
-                        obj.set<JsonNode>(key, reconstructNode(value, newPath))
+                    node.fields().forEach { (k, v) ->
+                        val np = if (path.isEmpty()) k else "$path.$k"
+                        obj.set<JsonNode>(k, reconstruct(v, np))
                     }
                     obj
                 }
 
-                node.isArray && node.size() > 0 -> {
+                node.isArray -> {
                     val arr = objectMapper.createArrayNode()
-                    val arrayPath = "$currentPath[0]"
-                    arr.add(reconstructNode(node[0], arrayPath))
+                    if (excelProps.array.firstElementOnly) {
+                        if (node.size() > 0) arr.add(reconstruct(node[0], "$path[0]"))
+                    } else {
+                        // indices to materialize: from discovered DOT headers (preferred), else template size
+                        val indices = arrayIndexMap[path]?.sorted()?.toList()
+                            ?: (0 until node.size()).toList()
+                        for (i in indices) {
+                            val elemTemplate =
+                                if (node.size() > 0) node[minOf(i, node.size() - 1)] else objectMapper.nullNode()
+                            arr.add(reconstruct(elemTemplate, "$path[$i]"))
+                        }
+                    }
                     arr
                 }
 
                 else -> {
-                    // Leaf: if an override from Excel exists, coerce using hint + template leaf
-                    val raw = pathToValue[currentPath]
+                    val raw = pathToValue[path]
                     if (raw != null) {
-                        val hint = pathToHint[currentPath]
-                        return coerceByHintThenTemplate(raw, hint, node)
-                    }
-                    // No override: keep template value
-                    node
+                        val hint = pathToHint[path]
+                        coerceByHintThenTemplate(raw, hint, node)  // your existing coercion
+                    } else node
                 }
             }
-        }
 
-        return reconstructNode(template, "")
+        return reconstruct(template, "")
+    }
+
+    /** Parse all [n] occurrences from a DOT path and record them per base path. */
+    private fun collectIndicesFromDotPath(
+        dotPath: String,
+        sink: MutableMap<String, MutableSet<Int>>
+    ) {
+        // Walk through e.g. "a.b[2].c[1].d" and record:
+        // base "a.b" -> 2, base "a.b[2].c" -> 1 (nested arrays supported)
+        var i = 0
+        while (true) {
+            val lb = dotPath.indexOf('[', i)
+            if (lb == -1) break
+            val rb = dotPath.indexOf(']', lb + 1)
+            if (rb == -1) break
+            val base = dotPath.substring(0, lb)             // base path before this index
+            val idx = dotPath.substring(lb + 1, rb).toIntOrNull()
+            if (idx != null) sink.getOrPut(base) { mutableSetOf() }.add(idx)
+            i = rb + 1
+        }
     }
 
 

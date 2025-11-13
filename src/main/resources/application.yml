@@ -44,7 +44,7 @@ bulk:
       strict-int: true
       date-format: yyyy-MM-dd'T'HH:mm:ss
     array:
-      first-element-only: true
+      first-element-only: false
 cleanup:
   enabled: true
   retention-days: 15

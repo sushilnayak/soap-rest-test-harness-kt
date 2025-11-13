@@ -15,13 +15,11 @@ import com.nayak.app.project.app.PagedResult
 import io.swagger.v3.oas.annotations.Parameter
 import jakarta.validation.constraints.Max
 import jakarta.validation.constraints.Min
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.reactor.mono
+import kotlinx.coroutines.runBlocking
 import org.springframework.core.io.ByteArrayResource
-import org.springframework.core.io.buffer.DataBufferUtils
+import org.springframework.core.io.buffer.DataBuffer
+import org.springframework.core.io.buffer.DataBufferFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
@@ -29,8 +27,9 @@ import org.springframework.http.server.reactive.ServerHttpResponse
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.web.bind.annotation.*
 import reactor.core.publisher.Flux
-import java.io.PipedInputStream
-import java.io.PipedOutputStream
+import reactor.core.publisher.FluxSink
+import reactor.core.publisher.Mono
+import java.io.OutputStream
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.*
@@ -126,107 +125,166 @@ class ExecutionHistoryController(
         )
 
     @GetMapping("/{executionId}/download/all-requests", produces = ["application/zip"])
-    suspend fun downloadAllRequests(
+    fun downloadAllRequests(
         @PathVariable executionId: UUID,
         response: ServerHttpResponse
-    ) {
-        // Build filename (or short-circuit to error)
+    ): Mono<Void> = mono {
         val fileName = downloadService.buildRequestsZipFileName(executionId).getOrElse { err ->
             response.statusCode = err.toHttpStatus()
             response.headers.contentType = MediaType.APPLICATION_JSON
             val buf = response.bufferFactory().wrap("""{"error":"${err.message}"}""".toByteArray())
-            response.writeWith(Flux.just(buf)).awaitSingleOrNull()
-            return
+            return@mono response.writeWith(Mono.just(buf)).then()
         }
 
         response.headers.contentType = MediaType.parseMediaType("application/zip")
         response.headers.add(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"$fileName\"")
 
-        // Create piped streams to connect writer coroutine with HTTP response
-        val input = PipedInputStream()
-        val output = PipedOutputStream(input)
-
-        // Writer job: runs on IO dispatcher and writes ZIP entries
-        val writerJob: Job = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                downloadService.writeAllRequestsZip(executionId, output).fold(
-                    ifLeft = { /* we cannot write headers now; stream likely open */
-                        // write a minimal empty zip if needed or simply close
-                        // (client will observe truncated/failed download)
-                    },
-                    ifRight = { /* ok */ }
-                )
-            } finally {
-                output.flush()
-                output.close()
+        val flux = dataBufferFlux(response.bufferFactory()) { os ->
+            runBlocking {
+                downloadService.writeAllRequestsZip(executionId, os).getOrElse { throw RuntimeException(it.message) }
             }
         }
-
-        // Reader side: stream input -> response as DataBuffers
-        val flux = DataBufferUtils.readInputStream(
-            { input },                          // supplier creates a fresh stream on subscribe (we already have one)
-            response.bufferFactory(),
-            16 * 1024                           // buffer size
-        ).doFinally {
-            // Ensure resources are closed even if client cancels
-            try {
-                input.close()
-            } catch (_: Exception) {
-            }
-        }
-
-        // Write and flush to client
-        response.writeWith(flux).awaitSingleOrNull()
-
-        // Ensure writer finishes (optional)
-        writerJob.join()
-    }
+        response.writeWith(flux).then()
+    }.flatMap { it }
 
     @GetMapping("/{executionId}/download/all-responses", produces = ["application/zip"])
-    suspend fun downloadAllResponses(
+    fun downloadAllResponses(
         @PathVariable executionId: UUID,
         response: ServerHttpResponse
-    ) {
+    ): Mono<Void> = mono {
         val fileName = downloadService.buildResponsesZipFileName(executionId).getOrElse { err ->
             response.statusCode = err.toHttpStatus()
             response.headers.contentType = MediaType.APPLICATION_JSON
             val buf = response.bufferFactory().wrap("""{"error":"${err.message}"}""".toByteArray())
-            response.writeWith(Flux.just(buf)).awaitSingleOrNull()
-            return
+            return@mono response.writeWith(Mono.just(buf)).then()
         }
 
         response.headers.contentType = MediaType.parseMediaType("application/zip")
         response.headers.add(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"$fileName\"")
 
-        val input = PipedInputStream()
-        val output = PipedOutputStream(input)
-
-        val writerJob: Job = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                downloadService.writeAllResponsesZip(executionId, output).fold(
-                    ifLeft = { /* swallow or log; stream may have started */ },
-                    ifRight = { }
-                )
-            } finally {
-                output.flush()
-                output.close()
+        val flux = dataBufferFlux(response.bufferFactory()) { os ->
+            runBlocking {
+                downloadService.writeAllRequestsZip(executionId, os).getOrElse { throw RuntimeException(it.message) }
             }
         }
+        response.writeWith(flux).then()
+    }.flatMap { it }
 
-        val flux = DataBufferUtils.readInputStream(
-            { input },
-            response.bufferFactory(),
-            16 * 1024
-        ).doFinally {
+
+//    @GetMapping("/{executionId}/download/all-responses", produces = ["application/zip"])
+//    suspend fun downloadAllResponses(
+//        @PathVariable executionId: UUID,
+//        response: ServerHttpResponse
+//    ) {
+//        val fileName = downloadService.buildResponsesZipFileName(executionId).getOrElse { err ->
+//            response.statusCode = err.toHttpStatus()
+//            response.headers.contentType = MediaType.APPLICATION_JSON
+//            val buf = response.bufferFactory().wrap("""{"error":"${err.message}"}""".toByteArray())
+//            response.writeWith(Flux.just(buf)).awaitSingleOrNull()
+//            return
+//        }
+//
+//        response.headers.contentType = MediaType.parseMediaType("application/zip")
+//        response.headers.add(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"$fileName\"")
+//
+//        val input = PipedInputStream()
+//        val output = PipedOutputStream(input)
+//
+//        val writerJob: Job = CoroutineScope(Dispatchers.IO).launch {
+//            try {
+//                downloadService.writeAllResponsesZip(executionId, output).fold(
+//                    ifLeft = { /* swallow or log; stream may have started */ },
+//                    ifRight = { }
+//                )
+//            } finally {
+//                output.flush()
+//                output.close()
+//            }
+//        }
+//
+//        val flux = DataBufferUtils.readInputStream(
+//            { input },
+//            response.bufferFactory(),
+//            16 * 1024
+//        ).doFinally {
+//            try {
+//                input.close()
+//            } catch (_: Exception) {
+//            }
+//        }
+//
+//        response.writeWith(flux).awaitSingleOrNull()
+//        writerJob.join()
+//    }
+
+    fun dataBufferFlux(
+        factory: DataBufferFactory,
+        writer: (out: OutputStream) -> Unit
+    ): Flux<DataBuffer> {
+        return Flux.create { sink ->
+            val out = DataBufferFluxOutputStream(factory, sink)
             try {
-                input.close()
-            } catch (_: Exception) {
+                writer(out)   // caller writes (blocking is fine; we’ll call from Dispatchers.IO)
+                out.close()
+                sink.complete()
+            } catch (t: Throwable) {
+                try {
+                    out.close()
+                } catch (_: Exception) {
+                }
+                sink.error(t)
             }
         }
-
-        response.writeWith(flux).awaitSingleOrNull()
-        writerJob.join()
     }
+
+    class DataBufferFluxOutputStream(
+        private val factory: DataBufferFactory,
+        private val sink: FluxSink<DataBuffer>,
+        private val chunkSize: Int = 16 * 1024
+    ) : OutputStream() {
+
+        private val buf = ByteArray(chunkSize)
+        private var pos = 0
+        private var closed = false
+
+        override fun write(b: Int) {
+            buf[pos++] = b.toByte()
+            if (pos >= buf.size) flushBuffer()
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            var offset = off
+            var remaining = len
+            while (remaining > 0) {
+                val space = buf.size - pos
+                val toCopy = minOf(space, remaining)
+                System.arraycopy(b, offset, buf, pos, toCopy)
+                pos += toCopy
+                offset += toCopy
+                remaining -= toCopy
+                if (pos >= buf.size) flushBuffer()
+            }
+        }
+
+        override fun flush() {
+            flushBuffer()
+        }
+
+        private fun flushBuffer() {
+            if (pos == 0 || closed) return
+            val dataBuffer = factory.allocateBuffer(pos)
+            dataBuffer.write(buf, 0, pos)
+            pos = 0
+            sink.next(dataBuffer)
+        }
+
+        override fun close() {
+            if (closed) return
+            flushBuffer()
+            closed = true
+        }
+    }
+
 //    @GetMapping("/{executionId}/download/all-requests", produces = ["application/zip"])
 //    suspend fun downloadAllRequests(
 //        @PathVariable executionId: UUID
