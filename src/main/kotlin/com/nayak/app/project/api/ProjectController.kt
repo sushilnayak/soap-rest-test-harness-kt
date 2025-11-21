@@ -233,7 +233,7 @@ class ProjectController(
     suspend fun generateExcelTemplate(
         @PathVariable id: UUID
     ): ResponseEntity<ByteArray> {
-        return bulkExecutionService.generateExcelTemplate(id).fold(
+        return bulkExecutionService.generateExcelTemplate(id, true).fold(
             ifLeft = { error ->
                 ResponseEntity.status(error.toHttpStatus()).build()
             },
