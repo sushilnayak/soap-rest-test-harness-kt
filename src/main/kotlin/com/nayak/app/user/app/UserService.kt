@@ -3,6 +3,7 @@ package com.nayak.app.user.app
 import arrow.core.Either
 import arrow.core.raise.either
 import arrow.core.raise.ensure
+import arrow.core.raise.ensureNotNull
 import com.nayak.app.common.errors.DomainError
 import com.nayak.app.user.domain.RoleFilter
 import com.nayak.app.user.domain.User
@@ -11,7 +12,6 @@ import com.nayak.app.user.repo.UserRepository
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.toList
 import org.springframework.stereotype.Service
-import java.util.*
 
 @Service
 class UserService(
@@ -20,7 +20,10 @@ class UserService(
 
     suspend fun deleteUser(racfId: String): Either<DomainError, Unit> = either {
         val user = userRepository.findByRacfId(racfId)
-            ?: raise(DomainError.NotFound("User with racfId '$racfId' does not exist"))
+
+        ensureNotNull(user) { DomainError.NotFound("User with racfId '$racfId' does not exist") }
+//        val user = userRepository.findByRacfId(racfId)
+//            ?: raise(DomainError.NotFound("User with racfId '$racfId' does not exist"))
 
         Either.catch {
             userRepository.delete(user)
@@ -61,7 +64,7 @@ class UserService(
         racfId: String,
         role: String,
         operation: RoleOperation
-    ): Either<DomainError, User> = either {
+    ): Either<DomainError, UserDto> = either {
 
         val user = Either.catch { userRepository.findByRacfId(racfId) }
             .mapLeft { th -> DomainError.Database("User lookup failed: ${th.message}") }
@@ -102,6 +105,7 @@ class UserService(
         Either.catch { userRepository.save(updatedUser) }
             .mapLeft { th -> DomainError.Database("Failed to update user role: ${th.message}") }
             .bind()
+            .toDto()
     }
 
     suspend fun searchUsers(
@@ -183,12 +187,12 @@ enum class RoleOperation {
 }
 
 
-data class UserDto(
-    val id: UUID,
-    val racfId: String,
-    val roles: Set<String>,
-    val isEnabled: Boolean
-)
+//data class UserDto(
+//    val id: UUID,
+//    val racfId: String,
+//    val roles: Set<String>,
+//    val isEnabled: Boolean
+//)
 
 data class PagedResult<T>(
     val content: List<T>,
