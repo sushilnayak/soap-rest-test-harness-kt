@@ -243,13 +243,16 @@ class ExecutionHistoryService(
             }
         }
 
+        // Parse rows with both value and isExcluded flag for EXPECTED_ columns
         val rows = excelData.path("validRows").map { row ->
             val idx = row.path("originalRowIndex").asInt()
             val data = row.path("data")
-            val map = mutableMapOf<String, String?>()
+            val map = mutableMapOf<String, CellInfo>()
             headersFromPayload.forEach { h ->
-                val v = data.path(h).path("value").asText("")
-                map[h] = v
+                val cellNode = data.path(h)
+                val v = cellNode.path("value").asText("")
+                val excluded = cellNode.path("isExcluded").asBoolean(false)
+                map[h] = CellInfo(v, excluded)
             }
             idx to map
         }.sortedBy { it.first }
@@ -259,7 +262,6 @@ class ExecutionHistoryService(
             if (withResults) LinkedHashMap(rows.size) else LinkedHashMap(0)
 
         if (withResults) {
-
             bulkExecutionRepository.streamAllResponses(bulkId).collect { proj ->
                 val idx = proj.rowIndex
                 val bodyStr = proj.body?.trim()
@@ -273,7 +275,7 @@ class ExecutionHistoryService(
             }
         }
 
-        //  Compose final headers (Request -> EXPECTED_ -> ACTUAL_)
+        //  Compose final headers (Request -> EXPECTED_ -> ACTUAL_ -> RESULT)
         val mandatory = listOf("Test Case ID", "Skip Case(Y/N)", "Description")
         val requestHeaders = headersFromPayload.filter { h ->
             !h.startsWith("EXPECTED_") && !mandatory.contains(h)
@@ -286,6 +288,7 @@ class ExecutionHistoryService(
             addAll(requestHeaders)
             addAll(expectedHeaders)
             addAll(actualHeaders)
+            if (withResults) add("RESULT") // Add RESULT column when exporting with results
         }
 
         val wb: Workbook = SXSSFWorkbook(200)
@@ -297,6 +300,7 @@ class ExecutionHistoryService(
                 mandatory.contains(h) -> ColKind.MANDATORY
                 h.startsWith("EXPECTED_") -> ColKind.EXPECTED
                 h.startsWith("ACTUAL_") -> ColKind.ACTUAL
+                h == "RESULT" -> ColKind.RESULT
                 else -> ColKind.REQUEST
             }
         }
@@ -311,26 +315,39 @@ class ExecutionHistoryService(
                     ColKind.REQUEST -> styles.headerRequest
                     ColKind.EXPECTED -> styles.headerExpected
                     ColKind.ACTUAL -> styles.headerActual
+                    ColKind.RESULT -> styles.headerResult
                 }
             }
         }
 
         rows.forEachIndexed { i, (rowIndex, reqMap) ->
             val r = sheet.createRow(i + 1)
+            val actualMap = rowIndexToActual[rowIndex] ?: emptyMap()
+
+            // Calculate PASS/FAIL by comparing non-excluded EXPECTED_ with ACTUAL_
+            val result = if (withResults) {
+                calculateRowResult(expectedHeaders, reqMap, actualMap)
+            } else null
+
             finalHeaders.forEachIndexed { col, header ->
                 val v: String? = when {
+                    header == "RESULT" -> result
                     // request side (mandatory+request): take from payload map
-                    !header.startsWith("EXPECTED_") && !header.startsWith("ACTUAL_") -> reqMap[header]
-                    header.startsWith("EXPECTED_") -> reqMap[header] // EXPECTED_ already present in payload
-                    else -> rowIndexToActual[rowIndex]?.get(header)  // ACTUAL_ from flattened response
+                    !header.startsWith("EXPECTED_") && !header.startsWith("ACTUAL_") -> reqMap[header]?.value
+                    header.startsWith("EXPECTED_") -> reqMap[header]?.value
+                    else -> actualMap[header]
                 }
                 val cell = r.createCell(col)
                 cell.setCellValue(v ?: "")
-                cell.cellStyle = when (colKind[col]) {
-                    ColKind.MANDATORY -> styles.dataMandatory
-                    ColKind.REQUEST -> styles.dataRequest
-                    ColKind.EXPECTED -> styles.dataExpected
-                    ColKind.ACTUAL -> styles.dataActual
+                cell.cellStyle = when {
+                    header == "RESULT" && v == "PASS" -> styles.dataPass
+                    header == "RESULT" && v == "FAIL" -> styles.dataFail
+                    header == "RESULT" -> styles.dataResult
+                    colKind[col] == ColKind.MANDATORY -> styles.dataMandatory
+                    colKind[col] == ColKind.REQUEST -> styles.dataRequest
+                    colKind[col] == ColKind.EXPECTED -> styles.dataExpected
+                    colKind[col] == ColKind.ACTUAL -> styles.dataActual
+                    else -> styles.dataRequest
                 }
             }
         }
@@ -347,15 +364,65 @@ class ExecutionHistoryService(
         it
     }
 
+    /**
+     * Data class to hold cell information with exclusion flag.
+     */
+    private data class CellInfo(val value: String?, val isExcluded: Boolean)
+
+    /**
+     * Compares EXPECTED_ columns with corresponding ACTUAL_ columns.
+     * Only non-excluded (non-colored) EXPECTED_ cells are compared.
+     * Returns "PASS" if all non-excluded expected values match actual values, "FAIL" otherwise.
+     */
+    private fun calculateRowResult(
+        expectedHeaders: List<String>,
+        reqMap: Map<String, CellInfo>,
+        actualMap: Map<String, String?>
+    ): String {
+        var hasComparisons = false
+
+        for (expectedHeader in expectedHeaders) {
+            val cellInfo = reqMap[expectedHeader] ?: continue
+
+            // Skip excluded (colored) cells
+            if (cellInfo.isExcluded) continue
+
+            val expectedValue = cellInfo.value ?: ""
+
+            // Skip empty expected values (nothing to compare)
+            if (expectedValue.isBlank()) continue
+
+            hasComparisons = true
+
+            // Get corresponding ACTUAL_ value
+            // EXPECTED_user.name -> ACTUAL_user.name
+            val fieldPath = expectedHeader.removePrefix("EXPECTED_")
+            val actualHeader = "ACTUAL_$fieldPath"
+            val actualValue = actualMap[actualHeader]?.trim() ?: ""
+
+            // Compare values (case-sensitive, trimmed)
+            if (expectedValue.trim() != actualValue) {
+                return "FAIL"
+            }
+        }
+
+        // If no comparisons were made (all excluded or empty), consider it PASS
+        return "PASS"
+    }
+
     private data class ColumnStyles(
         val headerMandatory: CellStyle,
         val headerRequest: CellStyle,
         val headerExpected: CellStyle,
         val headerActual: CellStyle,
+        val headerResult: CellStyle,
         val dataMandatory: CellStyle,
         val dataRequest: CellStyle,
         val dataExpected: CellStyle,
-        val dataActual: CellStyle
+        val dataActual: CellStyle,
+        val dataResult: CellStyle,
+        val dataPass: CellStyle,
+        val dataFail: CellStyle
     )
 
     private fun createColumnStyles(wb: Workbook): ColumnStyles {
@@ -388,16 +455,21 @@ class ExecutionHistoryService(
         val reqColor = IndexedColors.GREY_25_PERCENT.index
         val expColor = IndexedColors.LIGHT_YELLOW.index
         val actColor = IndexedColors.LIGHT_GREEN.index
+        val resultColor = IndexedColors.LAVENDER.index
 
         return ColumnStyles(
             headerMandatory = header(mandColor),
             headerRequest = header(reqColor),
             headerExpected = header(expColor),
             headerActual = header(actColor),
+            headerResult = header(resultColor),
             dataMandatory = data(IndexedColors.PALE_BLUE.index),
             dataRequest = data(IndexedColors.GREY_25_PERCENT.index),
             dataExpected = data(IndexedColors.LEMON_CHIFFON.index),
-            dataActual = data(IndexedColors.LIGHT_TURQUOISE.index)
+            dataActual = data(IndexedColors.LIGHT_TURQUOISE.index),
+            dataResult = data(IndexedColors.WHITE.index),
+            dataPass = data(IndexedColors.BRIGHT_GREEN.index),
+            dataFail = data(IndexedColors.RED.index)
         )
     }
 
@@ -425,8 +497,14 @@ class ExecutionHistoryService(
             }
 
             node.isArray -> {
-                if (node.size() > 0) out.putAll(flattenJson(node[0], "$path[0]"))
-                else out[path] = null
+                if (node.size() == 0) {
+                    out[path] = null
+                } else {
+                    node.elements().asSequence().forEachIndexed { i, elem ->
+                        val p = if (path.isEmpty()) "[$i]" else "$path[$i]"
+                        out.putAll(flattenJson(elem, p))
+                    }
+                }
             }
 
             else -> out[path] = when {
@@ -509,4 +587,4 @@ class ExecutionHistoryService(
 
 }
 
-private enum class ColKind { MANDATORY, REQUEST, EXPECTED, ACTUAL }
+private enum class ColKind { MANDATORY, REQUEST, EXPECTED, ACTUAL, RESULT }

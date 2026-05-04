@@ -59,7 +59,7 @@ class SecurityConfig(
                 exchanges
                     .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                     .pathMatchers("/actuator/health").permitAll()
-                    .pathMatchers("/v3/api-docs/**", "/swagger-ui/**", "/webjars/**").permitAll()
+                    .pathMatchers("/v3/api-docs/**", "/swagger-ui/**", "/v3/api-docs.yaml", "/webjars/**").permitAll()
                     .pathMatchers(HttpMethod.POST, "/api/auth/**").permitAll()
                     .anyExchange().authenticated()
             }

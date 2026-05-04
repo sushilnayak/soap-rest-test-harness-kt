@@ -51,6 +51,9 @@ class BulkExecutionService(
 
     private val tokenCache = java.util.concurrent.ConcurrentHashMap<String, CachedToken>()
 
+    // Production-grade JSON reconstructor that properly handles cell exclusions
+    private val jsonReconstructor = JsonReconstructor(objectMapper, excelProps)
+
     suspend fun processBulkExecution(
         request: BulkExecutionRequest,
         excelFile: InputStream,
@@ -559,9 +562,18 @@ class BulkExecutionService(
     ): ExecutionRequest {
         val headers = extractHeaders(meta).toMutableMap()
         cachedAuthHeader?.let { headers[it.key] = it.value }
+
         // Reconstruct request body from rowData using the request template structure
+        // The JsonReconstructor properly handles cell exclusions by omitting colored cell paths
         val requestBody = project.requestTemplate?.let { template ->
-            reconstructJsonFromRowData(template, rowData, "")
+            jsonReconstructor.reconstructWithExclusions(template, rowData)
+                .fold(
+                    ifLeft = { error ->
+                        logger.warn("JSON reconstruction failed: ${error.message}, falling back to legacy method")
+                        reconstructJsonFromRowData(template, rowData, "")
+                    },
+                    ifRight = { it }
+                )
         } ?: meta.get("requestTemplate")
 
         return when (project.type) {

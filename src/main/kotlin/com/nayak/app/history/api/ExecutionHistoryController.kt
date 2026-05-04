@@ -1,12 +1,11 @@
 package com.nayak.app.history.api
 
-import arrow.core.Either
 import arrow.core.getOrElse
 import arrow.core.raise.either
 import com.nayak.app.bulk.repo.ResultRowProjection
-import com.nayak.app.common.errors.DomainError
 import com.nayak.app.common.errors.toHttpStatus
 import com.nayak.app.common.http.ApiResponse
+import com.nayak.app.common.http.toResponse
 import com.nayak.app.history.app.ExecutionDownloadService
 import com.nayak.app.history.app.ExecutionHistoryService
 import com.nayak.app.history.domain.ExecutionHistoryItemDto
@@ -30,7 +29,6 @@ import reactor.core.publisher.Flux
 import reactor.core.publisher.FluxSink
 import reactor.core.publisher.Mono
 import java.io.OutputStream
-import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.*
 
@@ -363,21 +361,12 @@ class ExecutionHistoryController(
         )
 
 
-    private fun okExcel(bytes: ByteArray, filename: String): ResponseEntity<ByteArray> {
-        val encoded = URLEncoder.encode(filename, StandardCharsets.UTF_8).replace("+", "%20")
-        return ResponseEntity.ok()
-            .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-            .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''$encoded")
-            .body(bytes)
-    }
+//    private fun okExcel(bytes: ByteArray, filename: String): ResponseEntity<ByteArray> {
+//        val encoded = URLEncoder.encode(filename, StandardCharsets.UTF_8).replace("+", "%20")
+//        return ResponseEntity.ok()
+//            .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+//            .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''$encoded")
+//            .body(bytes)
+//    }
 
-    private fun <A> Either<DomainError, A>.toResponse(): ResponseEntity<ApiResponse<A>> =
-        fold(
-            ifLeft = { e ->
-                ResponseEntity.status(e.toHttpStatus()).body(ApiResponse.error(e.message))
-            },
-            ifRight = { a ->
-                ResponseEntity.ok(ApiResponse.success(a))
-            }
-        )
 }
