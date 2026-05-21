@@ -251,11 +251,39 @@ class BulkExecutionService(
     private fun isCellColoredForExclusion(cell: Cell): Boolean {
         return try {
             val cellStyle = cell.cellStyle
-            val fillForegroundColor = cellStyle.fillForegroundColor
+            val fillPattern = cellStyle.fillPattern
 
-            // Consider cells with red background (index 10) or yellow background (index 13) as excluded
-            // You can customize this logic based on your color scheme
-            fillForegroundColor == 10.toShort() || fillForegroundColor == 13.toShort()
+            // No fill means no color applied
+            if (fillPattern == FillPatternType.NO_FILL) return false
+
+            // In Excel, "background color" (the fill bucket) is stored as fillForegroundColor
+            // with SOLID_FOREGROUND pattern. The fillBackgroundColor is for pattern secondary color.
+
+            // For XSSF (xlsx) files, use XSSFCellStyle to get the actual RGB color
+            if (cell is org.apache.poi.xssf.usermodel.XSSFCell) {
+                val xssfStyle = cell.cellStyle as org.apache.poi.xssf.usermodel.XSSFCellStyle
+                val xssfColor = xssfStyle.fillForegroundXSSFColor ?: return false
+
+                // Get RGB values
+                val rgb = xssfColor.rgb ?: xssfColor.rgbWithTint ?: return false
+                if (rgb.size < 3) return false
+
+                val r = rgb[0].toInt() and 0xFF
+                val g = rgb[1].toInt() and 0xFF
+                val b = rgb[2].toInt() and 0xFF
+
+                // Detect red-ish colors (R high, G and B low)
+                val isRed = r > 180 && g < 100 && b < 100
+                // Detect yellow-ish colors (R and G high, B low)
+                val isYellow = r > 200 && g > 180 && b < 100
+
+                return isRed || isYellow
+            }
+
+            // Fallback for HSSF (xls) files: use indexed colors
+            val fgColor = cellStyle.fillForegroundColor
+            fgColor == IndexedColors.RED.index || fgColor == IndexedColors.YELLOW.index ||
+                    fgColor == 10.toShort() || fgColor == 13.toShort()
         } catch (e: Exception) {
             false
         }
@@ -530,8 +558,7 @@ class BulkExecutionService(
                 project,
                 targetUrl,
                 processedMeta,
-//                filteredRowData,
-                rowData.filterValues { !it.isExcluded },
+                rowData, // Pass full rowData (including excluded cells) so JsonReconstructor can handle exclusions
                 cachedAuthToken
             )
         }.let { executionRequest ->
@@ -565,8 +592,10 @@ class BulkExecutionService(
 
         // Reconstruct request body from rowData using the request template structure
         // The JsonReconstructor properly handles cell exclusions by omitting colored cell paths
+        // Note: Request columns in Excel have no prefix (prefix="" in generateExcelTemplate),
+        // so we must pass prefix="" here to match the actual Excel header names.
         val requestBody = project.requestTemplate?.let { template ->
-            jsonReconstructor.reconstructWithExclusions(template, rowData)
+            jsonReconstructor.reconstructWithExclusions(template, rowData, prefix = "")
                 .fold(
                     ifLeft = { error ->
                         logger.warn("JSON reconstruction failed: ${error.message}, falling back to legacy method")
